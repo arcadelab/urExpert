@@ -6,49 +6,17 @@ from model import EncoderDecoder
 import matplotlib.pyplot as plt
 import numpy as np
 import time
+import argparse
 
-def overfit_samples(dataloader, data_id, model, loss_function, optimizer, iteration_number=2000, use_gpu=False, use_task=False):
-    loss_plot = []
-    running_loss = 0
-    running_total = 0
-    start = time.time()
-    for i in range(iteration_number):
-        data = dataloader[data_id]
-        src = data.batched_src_kinematics
-        tgt = data.batched_tgt_kinematics
-        tgt_y = data.batched_tgt_kinematics_y
-        src_mask = data.src_mask
-        tgt_mask = data.trg_mask
-        if use_gpu:
-            model = model.cuda()
-            src = src.cuda()
-            tgt = tgt.cuda()
-            tgt_y = tgt_y.cuda()
-            src_mask = src_mask.cuda()
-            tgt_mask = tgt_mask.cuda()
-        optimizer.zero_grad()
-        if use_task:
-            src_task = data.batched_src_gesture
-            if use_gpu:
-                src_task = src_task.cuda()
-            pred = model(src, tgt, src_mask, tgt_mask, src_task)
-        else:
-            pred = model(src, tgt, src_mask, tgt_mask)
-        loss = loss_function(pred, tgt_y)
-        loss.backward()
-        optimizer.step()
-        running_total+=1
-        running_loss+=loss.item()
-        if i % 100 == 99:
-            loss_plot.append(running_loss / running_total)
-            elapsed = time.time() - start
-            print("Epoch Step: %d Loss: %f iteration per Sec: %f" %
-                    (i, running_loss / running_total, running_total / elapsed))
-        if i % 3000 == 2999:
-            for p in optimizer.param_groups:
-                p['lr'] *= 0.1
-    torch.save(model, "checkpoint/model_overfir"+str(data_id)+".pth")
-    return loss_plot
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--configs", type=str, default=None)
+    args = parser.parse_args()
+    return args
+
+def parse_configs(configs):
+    pass
 
 def visulize_results(dataloader, data_id, loss_function, model, use_gpu=False, model_path=None, use_task=False):
     if model_path is not None:
@@ -91,8 +59,6 @@ def visulize_results(dataloader, data_id, loss_function, model, use_gpu=False, m
             plt.plot(gt_inds, gt_data,  color='green')
             plt.plot(pred_inds, pred_data,color='red')
         plt.show()
-
-
 
 def train_epochs(dataloader, split,model, loss_function, optimizer, n_epochs=100, use_gpu=False, use_task=False):
 
@@ -145,42 +111,7 @@ def train_epochs(dataloader, split,model, loss_function, optimizer, n_epochs=100
             p['lr'] *= 0.98
     return running_loss_plot
 
-
-class NoamOpt:
-
-    "Optim wrapper that implements rate."
-
-    def __init__(self, model_size, factor, warmup, optimizer):
-
-        self.optimizer = optimizer
-        self._step = 0
-        self.warmup = warmup
-        self.factor = factor
-        self.model_size = model_size
-        self._rate = 0
-
-    def step(self):
-
-        "Update parameters and rate"
-        self._step += 1
-        rate = self.rate()
-        for p in self.optimizer.param_groups:
-            p['lr'] = rate
-        self._rate = rate
-        self.optimizer.step()
-
-    def rate(self, step = None):
-        "Implement `lrate` above"
-        if step is None:
-            step = self._step
-        return self.factor * \
-            (self.model_size ** (-0.5) *
-            min(step ** (-0.5), step * self.warmup ** (-1.5)))
-
-def get_std_opt(model):
-
-    return NoamOpt(model.src_embed[0].input_size, 2, 500,
-            torch.optim.Adam(model.parameters(), lr=0, betas=(0.9, 0.98), eps=1e-9))
+loss_choice = {'l1_norm':l1_norm, 'l2_norm':l2_norm}
 
 def l2_norm(preds, targets):
     loss = ((preds - targets) ** 2).mean()
@@ -194,26 +125,57 @@ if __name__ == '__main__':
     use_gpu = torch.cuda.is_available()
     if use_gpu:
         print("use_gpu")
-    dataset = JIGSAWSegmentsDataset(['/home/hding15/cis2/data/Knot_Tying'],['Knot_Tying'])
-    dataloader = JIGSAWSegmentsDataloader(10, 30, 10, dataset, scale=100)
-    model = EncoderDecoder(6, 6, N=10, input_size=512, hidden_layer=2048, h=8, dropout=0.1, task_dim=15)
-    loss_function = l1_norm
-    optimizer = torch.optim.Adam(model.parameters(), lr=0.01, betas=(0.9, 0.98), eps=1e-9)
-    loss_plot = overfit_samples(dataloader, 0, model, loss_function, optimizer, iteration_number=10000 , use_gpu=use_gpu, use_task=False)
-    # np.save("loss_plot.npy", np.array(loss_plot))
-    # loss_index = list(range(len(loss_plot)))
-    visulize_results(dataloader, 0, loss_function, model, use_gpu=use_gpu, model_path=None, use_task=False)
-    #visulize_overfit_results(dataloader, 0, loss_function, model, use_gpu=use_gpu, model_path="/home/hding15/cis2/urExpert/checkpoint/model_overfit0_simple.pth")
-    # visulize_overfit_results(dataloader, 0, loss_function, model, use_gpu=use_gpu, model_path="/home/hding15/cis2/urExpert/checkpoint/model_overfit0_complex.pth")
-    # train_split = [i for i in range(400)]
-    # running_loss_plot = train_epochs(dataloader, train_split, model, loss_function, optimizer, n_epochs=300, use_gpu=use_gpu, use_task=True)
-    # visulize_results(dataloader, 0, loss_function, model, use_gpu=use_gpu, use_task=True)
-    # visulize_results(dataloader, 400, loss_function, model, use_gpu=use_gpu)
-    # np.save("running_loss_plot.npy", np.array(running_loss_plot))
-    # running_loss_index = list(range(len(running_loss_plot)))
-    # plt.figure(figsize=(10,5))
-    # plt.subplot(1, 2, 1)
-    # plt.plot(loss_index, loss_plot)
-    # plt.subplot(1, 2, 2)
-    # plt.plot(running_loss_index, running_loss_plot)
-    # plt.show()
+    args = parse_args()
+    if args.configs is not None:
+        configs = parse_configs(args.configs)
+        dataset_path = configs.dataset_path
+        dataset_tasks = configs.dataset_tasks
+        batch_size = configs.batch_size
+        input_length = configs.input_length
+        output_length = configs.output_length
+        scale = configs.scale
+        src_vocab = configs.src_vocab
+        tgt_vocab = configs.tgt_vocab
+        num_layers = configs.num_layers
+        feature_dim = configs.feature_dim
+        hidden_layer = configs.hidden_layer
+        num_heads = configs.num_heads
+        dropout = configs.dropout
+        loss_function = loss_choice[configs.loss_function]
+        learning_rate = configs.learning_rate
+        betas = configs.betas
+        eps = configs.eps
+        num_epochs = configs.num_epochs
+        use_task = configs.use_task
+        task_dim = configs.task_dim
+        train_split = configs.train_split
+    else:
+        dataset_path = ['/home/hding15/cis2/data/Knot_Tying']
+        dataset_tasks = ['Knot_Tying']
+        batch_size = 10
+        input_length = 30
+        output_length = 10
+        scale = 100
+        src_vocab = 6
+        tgt_vocab = 6
+        num_layers = 20
+        feature_dim = 512
+        hidden_layer = 2048
+        num_heads = 8
+        dropout = 0.1
+        loss_function = loss_choice['l1_norm']
+        learning_rate = 0.01
+        betas = (0.9, 0.98)
+        eps = 1e-9
+        num_epochs = 150
+        use_task = True
+        task_dim = 15
+        train_split = [i for i in range(400)]
+
+
+    dataset = JIGSAWSegmentsDataset(dataset_path,dataset_tasks)
+    dataloader = JIGSAWSegmentsDataloader(batch_size, input_length, output_length, dataset, scale=scale)
+    model = EncoderDecoder(src_vocab, tgt_vocab, N=num_layers, input_size=feature_dim, hidden_layer=hidden_layer, h=num_heads, dropout=dropout, task_dim=task_dim)
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, betas=betas, eps=eps)
+    running_loss_plot = train_epochs(dataloader, train_split, model, loss_function, optimizer, n_epochs=num_epochs, use_gpu=use_gpu, use_task=use_task)
+    visulize_results(dataloader, 0, loss_function, model, use_gpu=use_gpu, use_task=use_task)
