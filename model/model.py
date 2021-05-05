@@ -23,31 +23,6 @@ def attention(query, key, value, mask=None, dropout=None):
         p_atten = dropout(p_atten)
     return torch.matmul(p_atten, value), p_atten
 
-# def make_model(src_vocab, tgt_vocab, N=6, input_size=512, hidden_layer=2048, h=8, dropout=0.1, task_dim=None):
-#     c = copy.deepcopy
-#     attn = MultiHeadAttention(h, input_size, dropout)
-#     ff = PositionwiseFeedForward(input_size, hidden_layer, dropout)
-#     positoin = PositionalEncoding(input_size, dropout)
-#     src_task_embeded = None
-#     tgt_task_embeded = None
-#     if task_dim is not None:
-#         src_task_embeded = nn.Sequential(Embedding(input_size, task_dim), c(positoin))
-#         tgt_task_embeded = nn.Sequential(Embedding(input_size, src_vocab), c(positoin))
-#     model = EncoderDecoder(
-#             Encoder(EncoderLayer(input_size, c(attn), c(ff), dropout), N),
-#             Decoder(DecoderLayer(input_size, c(attn), c(attn), c(ff), dropout), N),
-#             nn.Sequential(nn.Linear(src_vocab, input_size), c(positoin)),
-#             nn.Sequential(nn.Linear(tgt_vocab, input_size), c(positoin)),
-#             Generator([input_size], tgt_vocab),
-#             src_task_embeded=src_task_embeded,
-#             tgt_task_embeded=tgt_task_embeded
-#         )
-
-#     for p in model.parameters():
-#         if p.dim() > 1:
-#              nn.init.xavier_uniform_(p)
-#     return model
-
 class MultiHeadAttention(nn.Module):
     """docstring for MultiHeadAttention"""
     def __init__(self, h, input_size, dropout=0.1):
@@ -81,7 +56,7 @@ class PositionwiseFeedForward(nn.Module):
         return self.w_2(self.dropout(F.relu(self.w_1(x))))
 
 class Embedding(nn.Module):
-    """docstring for Embedding"""
+    """docstring for Embedding for integer input"""
     def __init__(self, input_size, vocab):
         super(Embedding, self).__init__()
         self.lut = nn.Embedding(vocab, input_size)
@@ -91,7 +66,7 @@ class Embedding(nn.Module):
         return self.lut(x) * math.sqrt(self.input_size)
 
 class Linear(nn.Module):
-    """docstring for Embedding"""
+    """docstring for Linear embbeding for float input"""
     def __init__(self, input_size, vocab):
         super(Linear, self).__init__()
         self.lut = nn.Linear(vocab, input_size)
@@ -120,6 +95,16 @@ class PositionalEncoding(nn.Module):
 class EncoderDecoder(nn.Module):
     """standard code for EncoderDecoder"""
     def __init__(self, src_vocab, tgt_vocab, N=6, input_size=512, hidden_layer=2048, h=8, dropout=0.1, task_dim=None):
+        '''
+        src_vocab: source vocab length which corresponding to the dimension of kinematics 
+        tgt_vocab, target vocab length which corresponding to the dimension of kinematics 
+        N: Number of encoder and decoder layers
+        Input_size: dimension of the intermediate layers
+        hidden_layer: the hidden_layer dimenson of the positionwise ff network
+        h: number of heads for multi head attention
+        dropout: dropout ratio for dropout layer
+        task_dim: if None means no task series will be input otherwise means dimension of the task input
+        '''
         super(EncoderDecoder, self).__init__()
         c = copy.deepcopy
         attn = MultiHeadAttention(h, input_size, dropout)
@@ -140,17 +125,6 @@ class EncoderDecoder(nn.Module):
         for p in self.parameters():
             if p.dim() > 1:
                  nn.init.xavier_uniform_(p)
-        
-        # self.encoder = encoder
-        # self.decoder = decoder
-        # self.src_embeded = src_embeded
-        # self.tgt_embeded = tgt_embeded
-        # if src_task_embeded is not None:
-        #     self.src_task_embeded = src_task_embeded
-        #     self.
-        # if tgt_task_embeded is not None:
-        #     self.tgt_task_embeded = tgt_task_embeded
-        # self.generator = generator
 
     def forward(self, src, tgt, src_mask, tgt_mask, src_task=None):
         return self.decode(self.encode(src, src_mask, src_task), src_mask, tgt, tgt_mask) + src[:, -1, :].unsqueeze(dim=1)
@@ -177,7 +151,7 @@ class EncoderDecoder(nn.Module):
 
 class Generator(nn.Module):
     """
-    standard linear predictor
+    standard linear predictor consists of several linear layers
     """
     def __init__(self, layer_dims, output_dim):
         super(Generator, self).__init__()
@@ -193,6 +167,7 @@ class Generator(nn.Module):
         return self.pred(x)
 
 class Encoder(nn.Module):
+    #Encoder layer consists of several encoder layer and has layer norm at the end
     def __init__(self, layer, n):
         super(Encoder, self).__init__()
         self.layers = clones_layers(layer, n)
@@ -227,7 +202,7 @@ class SublayerConnection(nn.Module):
 
 
 class EncoderLayer(nn.Module):
-    """docstring for EncoderLayer"""
+    """docstring for EncoderLayer: consists of self attention, feed forward and sublayer connections"""
     def __init__(self, size, self_attn, feed_forward, dropout):
         super(EncoderLayer, self).__init__()
         self.self_attn = self_attn
@@ -252,7 +227,7 @@ class Decoder(nn.Module):
         return self.norm(x)
 
 class DecoderLayer(nn.Module):
-    """docstring for DecoderLayer"""
+    """Decpde layer consists of self ateention, cross attention, feed forward and sublayer connections"""
     def __init__(self, size, self_attn, src_attn, feed_forward, dropout):
         super(DecoderLayer, self).__init__()
         self.self_attn = self_attn

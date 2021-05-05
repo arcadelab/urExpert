@@ -17,7 +17,15 @@ total_gesture = 15
 
 
 class JIGSAWSegmentsDataset(data.Dataset):
+    #dataset class to parse the folder and read data for each segments
     def __init__(self, folder_paths, tasks, transforms=None, kinematicsObj=['sl_tool_xyz', 'sr_tool_xyz']):
+        '''
+            init function for JIGSAWSegmentsDataset
+            input: folder_paths and corresponding tasks as input, each folder correspongding to one task like ['knot_tying', 'suturing']
+                   transformers: transform functions for tensor
+                   kinematicsObj: the item of kinematics that we want from the kinematics
+            This will parse the folder and get all videoPaths, annotations, kinematics pathes and tasks
+        '''
         assert len(folder_paths) == len(tasks)
         self.folder_paths = folder_paths
         self.tasks = tasks
@@ -53,6 +61,13 @@ class JIGSAWSegmentsDataset(data.Dataset):
         return len(self.allvideoPath)
 
     def __getitem__(self, idx: int):
+        '''
+            return:
+            video segments which is tensor of shape [n, h, w]
+            kinematics which is tensor of shape [n, m] (m is the dimension of kinematics data)
+            gesture: which is tensor of shape [n] all value is the gesture id
+            state: which is tensor of shape [n] all value is the state id
+        '''
         frames = getVideoFrames(self.allvideoPath[idx])[0]
         rawKinematics = readKinematics(self.allKinematicPath[idx])
         annotation = self.allAnnotations[idx]
@@ -77,7 +92,11 @@ class JIGSAWSegmentsDataset(data.Dataset):
         return segments, kinematics, gesture, state
 
 class JIGSAWSegmentsDataloader(data.Dataset):
+    #The dataloader class which takes the raw data from the dataset and generate batched data for model
     def __init__(self, batch_size, input_size, output_size, dataset, scale=100):
+        '''
+        it stores bacth size, input serie length, output serie length and the dataset to get raw data, and the scale to scale the kinematics data 
+        '''
         self.dataset = dataset
         self.batch_size = batch_size
         self.input_size = input_size
@@ -89,9 +108,16 @@ class JIGSAWSegmentsDataloader(data.Dataset):
         return len(self.dataset)
 
     def __getitem__(self, idx: int):
+        '''
+        takes the raw input from the stored dataset
+        it will generate a batch of sourece data with length self.input_size
+        and target data with length self.output_size
+        The return value is a JIGSAWBatch
+        '''
         segments, kinematics, gesture, state = self.dataset[idx]
         #not enough size for sample, pad it with still image/kinematics
         if segments.size(0) <= self.minimum_size:
+            #if don't want this kind of example just return None and handle None during training and inference
             return None
             new_segments = segments.new_zeros(self.minimum_size, *(segments.shape[1:]))
             new_segments[:segments.size(0)] = segments
@@ -117,6 +143,7 @@ class JIGSAWSegmentsDataloader(data.Dataset):
         input_size = self.input_size
         sample_thresh = list(range(len(kinematics) - output_size - input_size))
         start_idns = random.sample(sample_thresh, self.batch_size)
+
         #start_idns = sample_thresh[:self.batch_size]
         batched_src_segments = []
         batched_tgt_segments = []
@@ -153,6 +180,27 @@ class JIGSAWBatch:
     "Object for holding a batch of data with mask during training."
     def __init__(self, batched_src_segments, batched_src_kinematics, batched_src_gesture, batched_src_state,
                     batched_tgt_segments=None, batched_tgt_kinematics=None, batched_tgt_gesture=None, batched_tgt_state=None):
+        '''
+            attributes:
+            self.batched_src_segments: sourece video frames, tensor of shape (batch_size, input_size, h, w)
+            self.batched_src_kinematics: sourece kinematics, tensor of shape (batch_size, input_size, m)
+            self.batched_src_gesture: sourece gesture id, tensor of shape (batch_size, input_size)
+            self.batched_src_state: sourece state, tensor of shape (batch_size, input_size)
+            self.src_mask: the input mask for the source input
+
+            self.batched_tgt_segments: target input video frames, tensor of shape (batch_size, output_size, h, w)
+            self.batched_tgt_segments_y: target gt video frames, tensor of shape (batch_size, output_size, h, w)
+            self.batched_tgt_kinematics: target input kinematics, tensor of shape (batch_size, output_size, m)
+            self.batched_tgt_kinematics_y: target gt kinematics, tensor of shape (batch_size, output_size, m)
+            self.batched_tgt_gesture: target input gesture, tensor of shape (batch_size, output_size)
+            self.batched_tgt_gesture_y: target gt gesture, tensor of shape (batch_size, output_size)
+            self.batched_tgt_state: target input state, tensor of shape (batch_size, output_size)
+            self.batched_tgt_state_y: target gt state, tensor of shape (batch_size, output_size)
+            self.trg_mask: the input mask for the target input
+
+
+
+        '''
         self.batched_src_segments = batched_src_segments
         self.batched_src_kinematics = batched_src_kinematics
         self.batched_src_gesture = batched_src_gesture
