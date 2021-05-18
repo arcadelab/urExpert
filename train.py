@@ -66,14 +66,18 @@ def train_epochs(dataloader, split,model, loss_function, optimizer, n_epochs=100
     running_loss = 0
     running_total = 0
     running_loss_plot = []
-    start = time.time()
     if use_gpu:
         model = model.cuda()
     for e in range(n_epochs):
+        valid = 0
+        running_loss = 0
+        running_total = 0
+        start = time.time()
         for i in range(len(split)):
             data = dataloader[split[i]]
             if data is None:
                 continue
+            valid += 1
             src = data.batched_src_kinematics
             tgt = data.batched_tgt_kinematics
             tgt_y = data.batched_tgt_kinematics_y
@@ -98,20 +102,19 @@ def train_epochs(dataloader, split,model, loss_function, optimizer, n_epochs=100
             optimizer.step()
             running_total += 1
             running_loss += loss.item()
+            elapsed = time.time() - start
             if i % 50 == 49:
                 running_loss_plot.append(running_loss / running_total)
-                elapsed = time.time() - start
                 print("Epoch Step: %d Loss: %f iteration per Sec: %f" %
                         (i, running_loss / running_total, running_total / elapsed))
-        print("Epoch_number : %d Loss: %f iteration per Sec: %f" %
-                        (e, running_loss / running_total, running_total / elapsed))
+        print("Epoch_number : %d Loss: %f iteration per Sec: %f, valid data ration: %f" %
+                        (e, running_loss / running_total, running_total / elapsed, valid/len(split)))
         if e % 10 == 9:
             torch.save(model, "checkpoint/model"+str(e)+".pth")
         for p in optimizer.param_groups:
-            p['lr'] *= 0.98
+            p['lr'] *= 0.95
     return running_loss_plot
 
-loss_choice = {'l1_norm':l1_norm, 'l2_norm':l2_norm}
 
 def l2_norm(preds, targets):
     loss = ((preds - targets) ** 2).mean()
@@ -120,6 +123,8 @@ def l2_norm(preds, targets):
 def l1_norm(preds, targets):
     loss = torch.abs(preds - targets).mean()
     return loss
+
+loss_choice = {'l1_norm':l1_norm, 'l2_norm':l2_norm}
 
 if __name__ == '__main__':
     use_gpu = torch.cuda.is_available()
@@ -168,9 +173,11 @@ if __name__ == '__main__':
         betas = (0.9, 0.98)
         eps = 1e-9
         num_epochs = 150
-        use_task = True
+        use_task = False
         task_dim = 15
         train_split = [i for i in range(400)]
+        # train_split = [0]
+        # num_epochs = 15000
 
 
     dataset = JIGSAWSegmentsDataset(dataset_path,dataset_tasks)
@@ -178,4 +185,4 @@ if __name__ == '__main__':
     model = EncoderDecoder(src_vocab, tgt_vocab, N=num_layers, input_size=feature_dim, hidden_layer=hidden_layer, h=num_heads, dropout=dropout, task_dim=task_dim)
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate, betas=betas, eps=eps)
     running_loss_plot = train_epochs(dataloader, train_split, model, loss_function, optimizer, n_epochs=num_epochs, use_gpu=use_gpu, use_task=use_task)
-    visulize_results(dataloader, 0, loss_function, model, use_gpu=use_gpu, use_task=use_task)
+    visulize_results(dataloader, 0, loss_function, model, use_gpu=use_gpu, use_task=use_task,model_path='/home/hding15/cis2/urExpert/checkpoint/model149.pth')

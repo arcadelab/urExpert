@@ -127,7 +127,9 @@ class EncoderDecoder(nn.Module):
                  nn.init.xavier_uniform_(p)
 
     def forward(self, src, tgt, src_mask, tgt_mask, src_task=None):
-        return self.decode(self.encode(src, src_mask, src_task), src_mask, tgt, tgt_mask) + src[:, -1, :].unsqueeze(dim=1)
+        src_in = src - src[:,0].unsqueeze(dim=1)
+        tgt_in = tgt - src[:,0].unsqueeze(dim=1)
+        return self.decode(self.encode(src_in, src_mask, src_task), src_mask, tgt_in, tgt_mask) + src[:, 0, :].unsqueeze(dim=1)
 
     def encode(self, src, src_mask, src_task=None):
         embedding = self.src_embeded(src)
