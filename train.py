@@ -39,8 +39,8 @@ def visualize():
                 plt.xlabel('frames')
                 plt.ylabel('true value')
                 plt.legend()
-                pic_name = pos_name[j] + " start frame " + str(i * 100) + " batch " + str(batch_id + 1)
-                plt.savefig(os.path.join(image_folder, pic_name), dpi=300, bbox_inches='tight')
+                # pic_name = pos_name[j] + " start frame " + str(i * 100) + " batch " + str(batch_id + 1)
+                # plt.savefig(os.path.join(image_folder, pic_name), dpi=300, bbox_inches='tight')
                 plt.show()
 
 
@@ -56,9 +56,12 @@ def train():
         # set optimizer zero gradient
         optimizer.zero_grad()
         # forward pass
-        output = model(psm1_pos[:, :, :input_frames + output_frames - 1]) # fetch 0-29, feed in 0-28
+        output = model(psm1_pos[:, :, :input_frames + output_frames - 1])  # fetch 0-29, feed in 0-28
         # compute, backpropagation, and record loss
-        loss = loss_function(output[:, :, input_frames - 1:], psm1_pos[:, :, input_frames:]) # out 0-28 (1-29 in practice), take 20-29, compare with gt 20-29
+        if is_penalize_all:
+            loss = loss_function(output, psm1_pos[:, :, 1:])
+        else:
+            loss = loss_function(output[:, :, input_frames - 1:], psm1_pos[:, :, input_frames:]) # out 0-28 (1-29 in practice), take 20-29, compare with gt 20-29
         loss.backward()
         running_loss += loss.item()
         # step optimizer
@@ -80,7 +83,10 @@ def eval():
         psm1_pos, psm2_pos = psm1_pos.to(device).float(), psm2_pos.to(device).float()
         with torch.no_grad():
             output = model(psm1_pos[:, :, :input_frames + output_frames - 1]) # fetch 0-29, feed in 0-28
-        loss = loss_function(output[:, :, input_frames - 1:], psm1_pos[:, :, input_frames:]) # out 0-28 (1-29 in practice), take 20-29, compare with gt 20-29
+        if is_penalize_all:
+            loss = loss_function(output, psm1_pos[:, :, 1:])
+        else:
+            loss = loss_function(output[:, :, input_frames - 1:], psm1_pos[:, :, input_frames:])  # out 0-28 (1-29 in practice), take 20-29, compare with gt 20-29
         running_loss += loss.item()
         count += 1
     # scheduler.step(running_loss / count)
@@ -105,19 +111,26 @@ def plot_loss():
     plt.xlabel('Epochs')
     plt.ylabel('Loss')
     plt.legend()
+    plt.savefig(os.path.join(sub_folder, "loss"))
     plt.show()
-    name = "loss"
-    plt.savefig(os.path.join(sub_folder, name))
 
 
 if __name__ == "__main__":
     # user parameters
     # training specific
-    num_epochs = 500
-    num_eval_epoch = 50
+    num_epochs = 100
+    num_eval_epoch = 5
     lr = 0.0001
     weight_decay = 0.01
+    is_penalize_all = True
     # dataset specific
+    is_generalize = True
+    scope = "general" if is_generalize else "overfit"
+    task = "Suturing"
+    task_folder = os.path.join("./data", task)
+    train_data_path = os.path.join(task_folder, "train") if is_generalize else os.path.join(task_folder, "overfit")
+    eval_data_path = os.path.join(task_folder, "eval") if is_generalize else os.path.join(task_folder, "overfit")
+    test_data_path = os.path.join(task_folder, "test") if is_generalize else os.path.join(task_folder, "overfit")
     input_frames = 60
     output_frames = 10
     is_zero_center = True
@@ -131,14 +144,14 @@ if __name__ == "__main__":
     load_checkpoint = False
     use_norm = False
     # plot specific
-    suffix = 'DecoderOnly-zerocenter-nonorm-nogap-simpfinal-in60out10'
+    suffix = "DecoderOnly-" + task + "-zerocenter-nonorm-nogap-penalall-in60out10-" + scope
     pos_name = ["PSM1 tool tip position x", "PSM1 tool tip position y", "PSM1 tool tip position z"]
 
     # create dataset
-    batch_size = 150
-    train_dataset = KinematicsDataset("./data/Needle_Passing/overfit", input_frames=input_frames, output_frames=output_frames, is_zero_center=is_zero_center, is_overfit=is_overfit, is_gap=is_gap)
-    eval_dataset = KinematicsDataset("./data/Needle_Passing/overfit", input_frames=input_frames, output_frames=output_frames, is_zero_center=is_zero_center, is_overfit=is_overfit, is_gap=is_gap)
-    test_dataset = KinematicsDataset("./data/Needle_Passing/overfit", input_frames=input_frames, output_frames=output_frames, is_zero_center=is_zero_center, is_overfit=is_overfit, is_gap=is_gap)
+    batch_size = 350
+    train_dataset = KinematicsDataset(train_data_path, input_frames=input_frames, output_frames=output_frames, is_zero_center=is_zero_center, is_overfit=is_overfit, is_gap=is_gap)
+    eval_dataset = KinematicsDataset(eval_data_path, input_frames=input_frames, output_frames=output_frames, is_zero_center=is_zero_center, is_overfit=is_overfit, is_gap=is_gap)
+    test_dataset = KinematicsDataset(test_data_path, input_frames=input_frames, output_frames=output_frames, is_zero_center=is_zero_center, is_overfit=is_overfit, is_gap=is_gap)
 
     # create dataloaders
     loader_train = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, drop_last=False)
@@ -175,9 +188,9 @@ if __name__ == "__main__":
     sub_folder = os.path.join(folder, time)
     if not os.path.exists(sub_folder):
         os.makedirs(sub_folder)
-    image_folder = os.path.join(sub_folder, 'image_folder')
-    if not os.path.exists(image_folder):
-        os.makedirs(image_folder)
+    train_image_folder = os.path.join(sub_folder, 'train_image_folder')
+    if not os.path.exists(train_image_folder):
+        os.makedirs(train_image_folder)
 
     # training starts
     train_loss = []
