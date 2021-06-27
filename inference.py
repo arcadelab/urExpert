@@ -19,28 +19,32 @@ def infer():
         psm1_pos, psm2_pos = data
         gt = psm1_pos.to(device).float()
         psm1_pos, psm2_pos  = psm1_pos.to(device).float()[:, :, :input_frames], psm2_pos.to(device).float()
-        for frame in range(output_frames):
-            with torch.no_grad():
-                output = model(psm1_pos[:, :, :input_frames+frame])
-            # extract last element from output as new prediction
-            pred = output[:, :, -1].unsqueeze(2)
-            # concatenate new prediction to input sequence
-            psm1_pos = torch.cat((psm1_pos, pred), dim=2)
+        if is_mask_enable:
+            for frame in range(output_frames):
+                with torch.no_grad():
+                    output = model(psm1_pos[:, :, :input_frames + output_frames - 1])  # fetch 0-29, feed in 0-28
+                # extract last element from output as new prediction
+                pred = output[:, :, -1].unsqueeze(2)
+                # concatenate new prediction to input sequence
+                psm1_pos = torch.cat((psm1_pos, pred), dim=2)
+        else:
+            output = model(psm1_pos[:, :, :input_frames])
 
         # compute prediction L1 Loss
-        loss = loss_function(psm1_pos[:, :, input_frames:], gt[:, :, input_frames:])
+        loss = loss_function(psm1_pos[:, :, input_frames:] if is_mask_enable else output, gt[:, :, input_frames:])
         infer_loss.append(loss.item())
 
         # plot inference result
         print("plot...")
         gt = gt.cpu().detach().data.numpy()
+        output = output.cpu().detach().data.numpy()
         psm1_pos = psm1_pos.cpu().detach().data.numpy()
         x_ = np.arange(input_frames + output_frames)
         for j in range(psm1_pos.shape[0]):
             for i in range(psm1_pos.shape[1]):
                 plt.figure()
                 plt.scatter(x_[:input_frames], psm1_pos[j, i, :input_frames], label='input', c="g")
-                plt.scatter(x_[input_frames:], psm1_pos[j, i, input_frames:], label='prediction', c="b")
+                plt.scatter(x_[input_frames:], psm1_pos[j, i, input_frames:] if is_mask_enable else output[j, i], label='prediction', c="b")
                 plt.scatter(x_[input_frames:], gt[j, i, input_frames:], label='ground truth', c="r")
                 plt.xlabel('frames')
                 plt.ylabel('true value')
@@ -48,7 +52,7 @@ def infer():
                 plt.legend()
                 pic_name = pos_name[i] + " start frame " + str(j * 100) + " batch " + str(batch_id + 1)
                 plt.savefig(os.path.join(inference_image_folder, pic_name), dpi=300, bbox_inches='tight')
-                # plt.show()
+                plt.show()
     print("Average loss is {}.".format(np.mean(infer_loss)))
 
 
@@ -59,15 +63,19 @@ if __name__ == "__main__":
     num_eval_epoch = 50
     lr = 0.0001
     weight_decay = 0.01
+    is_mask_enable = False
     # dataset specific
-    is_generalize = False
+    is_generalize = True
+    is_extreme = False
+    is_overfit = False
+    scope = "general" if is_generalize else "overfit"
     task = "Needle_Passing"
     task_folder = os.path.join("./data", task)
-    test_data_path = os.path.join(task_folder, "test") if is_generalize else os.path.join(task_folder, "overfit")
-    input_frames = 60
-    output_frames = 10
+    test_data_path = os.path.join(task_folder, "test") if is_generalize else os.path.join(task_folder,
+                                                                                          "overfit_extreme" if is_extreme else "overfit")
+    input_frames = 150
+    output_frames = 30
     is_zero_center = True
-    is_overfit = False
     is_gap = True
     # model specific
     feat_dim = 512
@@ -77,12 +85,13 @@ if __name__ == "__main__":
     load_checkpoint = False
     use_norm = False
     # plot specific
-    suffix = "DecoderOnly-" + task + "-zerocenter-nonorm-nogap-penalall-in60out10"
+    suffix = "DecoderOnly-" + task + "-zerocenter-nonorm-penalall-in" + str(input_frames) + "out" + str(
+        output_frames) + "-" + scope + "-numdecode" + str(num_attn_layers) + "-classifier" if is_mask_enable else "-"
     pos_name = ["PSM1 tool tip position x", "PSM1 tool tip position y", "PSM1 tool tip position z"]
-    time = "18_05"
+    time = "19_05"
 
     # create dataset
-    batch_size = 150
+    batch_size = 5
     test_dataset = KinematicsDataset(test_data_path, input_frames=input_frames,
                                      output_frames=output_frames, is_zero_center=is_zero_center, is_overfit=is_overfit,
                                      is_gap=is_gap)
@@ -93,7 +102,9 @@ if __name__ == "__main__":
     # initialize model
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     model = DecoderOnlyTransformer(feat_dim=feat_dim, nhead=nhead, num_attn_layers=num_attn_layers,
-                                   channel=input_channel, device=device, use_norm=use_norm)
+                                   channel=input_channel, device=device, use_norm=use_norm,
+                                   is_mask_enable=is_mask_enable, input_frames=input_frames,
+                                   output_frames=output_frames)
     model.cuda()
 
     # load checkpoint

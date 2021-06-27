@@ -19,7 +19,11 @@ def visualize():
         psm1_pos, psm2_pos = data
         psm1_pos, psm2_pos = psm1_pos.to(device).float(), psm2_pos.to(device).float()
         with torch.no_grad():
-            output = model(psm1_pos[:, :, :input_frames + output_frames - 1])  # fetch 0-29, feed in 0-28
+            # forward pass
+            if is_mask_enable:
+                output = model(psm1_pos[:, :, :input_frames + output_frames - 1])  # fetch 0-29, feed in 0-28
+            else:
+                output = model(psm1_pos[:, :, :input_frames])
 
         # plot prediction vs gt
         # separate past from future
@@ -34,7 +38,7 @@ def visualize():
                 plt.figure()
                 plt.scatter(x[:input_frames], psm1_cur_pos[i, j], label='input', c="g")
                 plt.scatter(x[input_frames:], psm1_nxt_pos[i, j], label='ground truth', c="r")
-                plt.scatter(x[input_frames:], output[i, j, input_frames-1:], label='prediction', c="b")
+                plt.scatter(x[input_frames:], output[i, j], label='prediction', c="b")
                 plt.title('frame ' + str(i * 100) + ' to frame ' + str((i + 1) * 100))
                 plt.xlabel('frames')
                 plt.ylabel('true value')
@@ -47,7 +51,6 @@ def visualize():
 def train():
     # set training mode
     model.train()
-    count = 0
     running_loss = 0
     for batch_id, data in enumerate(loader_train):
         # fetch data
@@ -55,44 +58,47 @@ def train():
         psm1_pos, psm2_pos = psm1_pos.to(device).float(), psm2_pos.to(device).float()
         # set optimizer zero gradient
         optimizer.zero_grad()
-        # forward pass
-        output = model(psm1_pos[:, :, :input_frames + output_frames - 1])  # fetch 0-29, feed in 0-28
-        # compute, backpropagation, and record loss
-        if is_penalize_all:
-            loss = loss_function(output, psm1_pos[:, :, 1:])
+        # forward pass, compute, backpropagation, and record loss
+        if is_mask_enable:
+            output = model(psm1_pos[:, :, :input_frames + output_frames - 1])  # fetch 0-29, feed in 0-28
+            loss = loss_function(output, psm1_pos[:, :, 1:]) if is_penalize_all else loss_function(
+                output[:, :, input_frames - 1:],
+                psm1_pos[:, :, input_frames:])  # out 0-28 (1-29 in practice), take 20-29, compare with gt 20-29
         else:
-            loss = loss_function(output[:, :, input_frames - 1:], psm1_pos[:, :, input_frames:]) # out 0-28 (1-29 in practice), take 20-29, compare with gt 20-29
+            output = model(psm1_pos[:, :, :input_frames])
+            loss = loss_function(output, psm1_pos[:, :, input_frames:])
         loss.backward()
         running_loss += loss.item()
         # step optimizer
         optimizer.step()
-        count = count + 1
-    train_loss.append(running_loss / count)
-    print("Train Loss = {} in epoch {}".format(running_loss / count, epoch))
-    return running_loss / count
+    train_loss.append(running_loss)
+    print("Train Loss = {} in epoch {}".format(running_loss, epoch))
+    return running_loss
 
 
 def eval():
     # set evaluation mode
     model.eval()
-    count = 0
     running_loss = 0
     for batch_id, data in enumerate(loader_eval):
         # fetch data
         psm1_pos, psm2_pos = data
         psm1_pos, psm2_pos = psm1_pos.to(device).float(), psm2_pos.to(device).float()
         with torch.no_grad():
-            output = model(psm1_pos[:, :, :input_frames + output_frames - 1]) # fetch 0-29, feed in 0-28
-        if is_penalize_all:
-            loss = loss_function(output, psm1_pos[:, :, 1:])
-        else:
-            loss = loss_function(output[:, :, input_frames - 1:], psm1_pos[:, :, input_frames:])  # out 0-28 (1-29 in practice), take 20-29, compare with gt 20-29
+            # forward pass, compute, backpropagation, and record loss
+            if is_mask_enable:
+                output = model(psm1_pos[:, :, :input_frames + output_frames - 1])  # fetch 0-29, feed in 0-28
+                loss = loss_function(output, psm1_pos[:, :, 1:]) if is_penalize_all else loss_function(
+                    output[:, :, input_frames - 1:],
+                    psm1_pos[:, :, input_frames:])  # out 0-28 (1-29 in practice), take 20-29, compare with gt 20-29
+            else:
+                output = model(psm1_pos[:, :, :input_frames])
+                loss = loss_function(output, psm1_pos[:, :, input_frames:])
         running_loss += loss.item()
-        count += 1
-    # scheduler.step(running_loss / count)
-    eval_loss.append(running_loss / count)
-    print("Eval Loss = {} in epoch {}".format(running_loss / count, epoch + 1))
-    return running_loss / count
+    scheduler.step(running_loss)
+    eval_loss.append(running_loss)
+    print("Eval Loss = {} in epoch {}".format(running_loss, epoch + 1))
+    return running_loss
 
 
 def save_model():
@@ -102,9 +108,9 @@ def save_model():
 
 
 def plot_loss():
-    with open(os.path.join(sub_folder, 'loss.csv'), 'w') as f:
-        write = csv.writer(f)
-        write.writerow(train_loss)
+    # with open(os.path.join(sub_folder, 'loss.csv'), 'w') as f:
+        # write = csv.writer(f)
+        # write.writerow(train_loss)
     x = np.arange(len(train_loss))
     plt.figure()
     plt.plot(x, train_loss, label='loss')
@@ -118,24 +124,30 @@ def plot_loss():
 if __name__ == "__main__":
     # user parameters
     # training specific
-    num_epochs = 100
-    num_eval_epoch = 5
+    num_epochs = 8000
+    num_eval_epoch = 100
     lr = 0.0001
-    weight_decay = 0.01
+    weight_decay = 0.0001
     is_penalize_all = True
+    is_mask_enable = False
+    save_ckpt = True
     # dataset specific
     is_generalize = True
-    scope = "general" if is_generalize else "overfit"
-    task = "Suturing"
-    task_folder = os.path.join("./data", task)
-    train_data_path = os.path.join(task_folder, "train") if is_generalize else os.path.join(task_folder, "overfit")
-    eval_data_path = os.path.join(task_folder, "eval") if is_generalize else os.path.join(task_folder, "overfit")
-    test_data_path = os.path.join(task_folder, "test") if is_generalize else os.path.join(task_folder, "overfit")
-    input_frames = 60
-    output_frames = 10
-    is_zero_center = True
+    is_extreme = False
     is_overfit = False
-    is_gap = False
+    scope = "general" if is_generalize else "overfit"
+    task = "Needle_Passing"
+    task_folder = os.path.join("./data", task)
+    train_data_path = os.path.join(task_folder, "train") if is_generalize else os.path.join(task_folder,
+                                                                                            "overfit_extreme" if is_extreme else "overfit")
+    eval_data_path = os.path.join(task_folder, "eval") if is_generalize else os.path.join(task_folder,
+                                                                                          "overfit_extreme" if is_extreme else "overfit")
+    test_data_path = os.path.join(task_folder, "test") if is_generalize else os.path.join(task_folder,
+                                                                                          "overfit_extreme" if is_extreme else "overfit")
+    input_frames = 150
+    output_frames = 30
+    is_zero_center = True
+    is_gap = True
     # model specific
     feat_dim = 512
     nhead = 8
@@ -144,14 +156,18 @@ if __name__ == "__main__":
     load_checkpoint = False
     use_norm = False
     # plot specific
-    suffix = "DecoderOnly-" + task + "-zerocenter-nonorm-nogap-penalall-in60out10-" + scope
+    suffix = "DecoderOnly-" + task + "-zerocenter-nonorm-penalall-in" + str(input_frames) + "out" + str(
+        output_frames) + "-" + scope + "-numdecode" + str(num_attn_layers) + "-classifier" if is_mask_enable else "-"
     pos_name = ["PSM1 tool tip position x", "PSM1 tool tip position y", "PSM1 tool tip position z"]
 
     # create dataset
-    batch_size = 350
-    train_dataset = KinematicsDataset(train_data_path, input_frames=input_frames, output_frames=output_frames, is_zero_center=is_zero_center, is_overfit=is_overfit, is_gap=is_gap)
-    eval_dataset = KinematicsDataset(eval_data_path, input_frames=input_frames, output_frames=output_frames, is_zero_center=is_zero_center, is_overfit=is_overfit, is_gap=is_gap)
-    test_dataset = KinematicsDataset(test_data_path, input_frames=input_frames, output_frames=output_frames, is_zero_center=is_zero_center, is_overfit=is_overfit, is_gap=is_gap)
+    batch_size = 5
+    train_dataset = KinematicsDataset(train_data_path, input_frames=input_frames, output_frames=output_frames,
+                                      is_zero_center=is_zero_center, is_overfit=is_overfit, is_gap=is_gap)
+    eval_dataset = KinematicsDataset(eval_data_path, input_frames=input_frames, output_frames=output_frames,
+                                     is_zero_center=is_zero_center, is_overfit=is_overfit, is_gap=is_gap)
+    test_dataset = KinematicsDataset(test_data_path, input_frames=input_frames, output_frames=output_frames,
+                                     is_zero_center=is_zero_center, is_overfit=is_overfit, is_gap=is_gap)
 
     # create dataloaders
     loader_train = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, drop_last=False)
@@ -160,7 +176,10 @@ if __name__ == "__main__":
 
     # initialize model
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    model = DecoderOnlyTransformer(feat_dim=feat_dim, nhead=nhead, num_attn_layers=num_attn_layers, channel=input_channel, device=device, use_norm=use_norm)
+    model = DecoderOnlyTransformer(feat_dim=feat_dim, nhead=nhead, num_attn_layers=num_attn_layers,
+                                   channel=input_channel, device=device, use_norm=use_norm,
+                                   is_mask_enable=is_mask_enable, input_frames=input_frames,
+                                   output_frames=output_frames)
     model.cuda()
     # check numbers of parameters
     # print(sum(p.numel() for p in model.parameters() if p.requires_grad))
@@ -178,19 +197,20 @@ if __name__ == "__main__":
         print("loading checkpoint succeed!")
 
     # create checkpoint folder for saving plots and model ckpt
-    now = datetime.now()
-    now = (str(now).split('.')[0]).split(' ')
-    date = now[0]
-    time = now[1].split(':')[0] + '_' + now[1].split(':')[1] + suffix
-    folder = os.path.join('./checkpoints', date)
-    if not os.path.exists(folder):
-        os.makedirs(folder)
-    sub_folder = os.path.join(folder, time)
-    if not os.path.exists(sub_folder):
-        os.makedirs(sub_folder)
-    train_image_folder = os.path.join(sub_folder, 'train_image_folder')
-    if not os.path.exists(train_image_folder):
-        os.makedirs(train_image_folder)
+    if save_ckpt:
+        now = datetime.now()
+        now = (str(now).split('.')[0]).split(' ')
+        date = now[0]
+        time = now[1].split(':')[0] + '_' + now[1].split(':')[1] + suffix
+        folder = os.path.join('./checkpoints', date)
+        if not os.path.exists(folder):
+            os.makedirs(folder)
+        sub_folder = os.path.join(folder, time)
+        if not os.path.exists(sub_folder):
+            os.makedirs(sub_folder)
+        train_image_folder = os.path.join(sub_folder, 'train_image_folder')
+        if not os.path.exists(train_image_folder):
+            os.makedirs(train_image_folder)
 
     # training starts
     train_loss = []

@@ -86,7 +86,7 @@ class DecoderLayer(nn.Module):
     Transformer Decoder Layer
     """
 
-    def __init__(self, interm_dim: int = 2048, feat_dim: int = 512, nhead: int = 8, dropout: int = 0, device: str = 'cuda', use_norm: bool = False):
+    def __init__(self, interm_dim: int = 2048, feat_dim: int = 512, nhead: int = 8, dropout: int = 0, device: str = 'cuda', use_norm: bool = False, is_mask_enable: bool = False):
         super(DecoderLayer, self).__init__()
         self.attn_layer = MultiHeadSelfAttention(d_model=feat_dim, nhead=nhead, dropout=dropout)
 
@@ -101,11 +101,12 @@ class DecoderLayer(nn.Module):
 
         self.device = device
         self.use_norm = use_norm
+        self.is_mask_enable = is_mask_enable
 
     def forward(self, x):
         # x.shape: N * L * D
         # generate mask
-        mask = generate_attn_mask(x.size(1)).to(self.device)
+        mask = generate_attn_mask(x.size(1)).to(self.device) if self.is_mask_enable else None
         # self-attn
         x = self.attn_layer(q=x, k=x, v=x, mask=mask) + x
         # feed forward
@@ -123,11 +124,12 @@ class Decoder(nn.Module):
     """
 
     def __init__(self, interm_dim: int = 2048, feat_dim: int = 256, nhead: int = 8, num_attn_layers: int = 10,
-                 dropout: int = 0, device: str = 'cuda', use_norm: bool = False):
+                 dropout: int = 0, device: str = 'cuda', use_norm: bool = False, is_mask_enable: bool = False):
         super().__init__()
 
         self.pos_encoder = PositionalEncoding(d_model=feat_dim, dropout=0, max_len=5000)
-        self.decoder_layer = DecoderLayer(interm_dim=interm_dim, feat_dim=feat_dim, nhead=nhead, dropout=dropout, device=device, use_norm=use_norm)
+        self.decoder_layer = DecoderLayer(interm_dim=interm_dim, feat_dim=feat_dim, nhead=nhead, dropout=dropout,
+                                          device=device, use_norm=use_norm, is_mask_enable=is_mask_enable)
         self.decoders = get_clones(self.decoder_layer, num_attn_layers)
 
     def forward(self, x):
@@ -145,22 +147,43 @@ class Decoder(nn.Module):
         return x
 
 
+class Classifier(nn.Module):
+    def __init__(self, in_channels: int = 512, out_channels: int = 3):
+        super().__init__()
+        # bs * (sl * dim) --> bs * (ousl * dim2)
+        self.classifier = nn.Sequential(
+            nn.Linear(in_channels, in_channels // 32),
+            nn.ReLU(),
+            nn.Linear(in_channels // 32, in_channels // 512),
+            nn.ReLU(),
+            nn.Linear(in_channels // 512, out_channels)
+        )
+
+    def forward(self, x):
+        return self.classifier(x)
+
+
 class DecoderOnlyTransformer(nn.Module):
     """
     Transformer computes self (intra image) and cross (inter image) attention
     """
 
     def __init__(self, feat_dim: int = 512, nhead: int = 8, num_attn_layers: int = 6, channel: int = 3,
-                 device: str = 'cuda', use_norm: bool = False):
+                 device: str = 'cuda', use_norm: bool = False, is_mask_enable: bool = False, input_frames: int = 300, output_frames: int = 30):
         super().__init__()
         self.feat_dim = feat_dim
         self.nhead = nhead
         self.num_attn_layers = num_attn_layers
+        self.channel = channel
+        self.input_frames = input_frames
+        self.output_frames = output_frames
+        self.is_mask_enable = is_mask_enable
 
         self.embeddings = nn.Linear(channel, feat_dim)
         self.decoder = Decoder(interm_dim=2048, feat_dim=feat_dim, nhead=nhead, num_attn_layers=num_attn_layers,
-                               dropout=0, device=device, use_norm=use_norm)
+                               dropout=0, device=device, use_norm=use_norm, is_mask_enable=is_mask_enable)
         self.final = nn.Linear(feat_dim, channel)
+        self.final_classifier = Classifier(in_channels=feat_dim*input_frames, out_channels=channel*output_frames)
 
     def forward(self, psm1: torch.Tensor):
         """
@@ -178,14 +201,17 @@ class DecoderOnlyTransformer(nn.Module):
         decoder_output = self.decoder(x)
 
         # Final layer
-        output = self.final(decoder_output).permute(0, 2, 1)  # input shape [N, W, C]
+        if self.is_mask_enable:
+            output = self.final(decoder_output).permute(0, 2, 1)  # input shape [N, W, C]
+        else:
+            output = self.final_classifier(decoder_output.reshape(-1, self.feat_dim * self.input_frames)).reshape(-1, self.output_frames, self.channel).permute(0, 2, 1)
         # print("fully connected layers output = {}".format(output.shape))
 
         return output
 
 
 if __name__ == "__main__":
-    # print(generate_attn_mask(10))
+    print(generate_attn_mask(10))
     m = nn.Softmax(dim=1)
     input = torch.randn(2, 3)
     output = m(input)
