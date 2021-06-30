@@ -53,18 +53,18 @@ class frame_patch_embed(nn.Module):
         """
         super(frame_patch_embed, self).__init__()
         assert img_width % patch_width == 0 and img_height % patch_height == 0, "frame height/width should be divisible by patch height/width"
-        self.patch = Rearrange('b c (h ph) (w pw) -> b (h w) (ph pw c)', ph=patch_height, pw=patch_width)
+        self.patch = Rearrange('b l c (h ph) (w pw) -> b l (h w) (ph pw c)', ph=patch_height, pw=patch_width)
         self.embedding = nn.Linear(patch_height * patch_width * in_dim, feat_dim)
 
     def forward(self, x):
         x = self.patch(x)
-        print("Tensor shape after patch: {}".format(x.shape))
+        # print("Tensor shape after patch: {}".format(x.shape))
         x = self.embedding(x)
-        print("Tensor shape after patch embedding: {}".format(x.shape))
+        # print("Tensor shape after patch embedding: {}".format(x.shape))
         return x
 
 class pos_embedding(nn.Module):
-    def __init__(self, feat_dim, num_patches, batch_size):
+    def __init__(self, feat_dim, num_patches, batch_size, capture_size, device):
         """
         This module add learnable CLS token and position embedding to the beginning of each patched frame.
         :param feat_dim: feature dimension
@@ -72,21 +72,21 @@ class pos_embedding(nn.Module):
         :param batch_size: training batch size
         """
         super(pos_embedding, self).__init__()
-        self.cls = repeat(nn.Parameter(torch.randn(1, 1, feat_dim)), '() n d -> b n d', b=batch_size)
-        self.pos_embedding = nn.Parameter(torch.randn(1, num_patches+1, feat_dim))
+        self.cls = repeat(nn.Parameter(torch.randn(1, capture_size, 1, feat_dim)), '() l n d -> b l n d', b=batch_size).to(device)
+        self.pos_embedding = nn.Parameter(torch.randn(1, capture_size, num_patches+1, feat_dim)).to(device)
 
     def forward(self, x):
-        x = torch.cat((self.cls, x), dim=1)
-        print("Tensor shape after cls concatenation: {}".format(x.shape))
+        x = torch.cat((self.cls, x), dim=2)
+        # print("Tensor shape after cls concatenation: {}".format(x.shape))
         x = x + self.pos_embedding
-        print("Tensor shape after pos embedding: {}".format(x.shape))
+        # print("Tensor shape after pos embedding: {}".format(x.shape))
         return x
 
 
 class Encoder(nn.Module):
     def __init__(self, is_feature_extract, num_conv_layers, input_channel, output_channel, conv_kernel_size,
                  conv_stride, pool_kernel_size, pool_stride, padding, img_height, img_width, patch_height, patch_width,
-                 in_dim, feat_dim, batch_size, dropout):
+                 in_dim, feat_dim, batch_size, capture_size, dropout, device):
         """
         Jigsaw dataset surgical video frames encoder. Architecture based on vision transformer encoder.
         :param is_feature_extract:
@@ -117,7 +117,7 @@ class Encoder(nn.Module):
         self.in_dim = output_channel if is_feature_extract else in_dim
         self.num_patches = (self.img_height // patch_height) * (self.img_width // patch_width)
         self.frame_patch_embed = frame_patch_embed(self.img_height, self.img_width, patch_height, patch_width, self.in_dim, feat_dim)
-        self.pos_embedding = pos_embedding(feat_dim, self.num_patches, batch_size)
+        self.pos_embedding = pos_embedding(feat_dim, self.num_patches, batch_size, capture_size, device)
         self.dropout = nn.Dropout(dropout)
 
     def forward(self,x):
@@ -130,7 +130,7 @@ class Encoder(nn.Module):
 
 
 if __name__ == "__main__":
-    is_feature_extract = True
+    is_feature_extract = False
     num_conv_layers = 3
     input_channel = 3
     output_channel = 256
@@ -139,18 +139,20 @@ if __name__ == "__main__":
     pool_kernel_size = 2
     pool_stride = 2
     padding = 1
-    img_height = 256
-    img_width = 256
-    patch_height = 16
-    patch_width = 16
+    img_height = 480
+    img_width = 640
+    patch_height = 32
+    patch_width = 32
     in_dim = 3
     feat_dim = 1024
     batch_size = 16
+    capture_size = 2
     dropout = 0.1
+    device = "cuda"
     model = Encoder(is_feature_extract=is_feature_extract, num_conv_layers=num_conv_layers, input_channel=input_channel,
                     output_channel=output_channel, conv_kernel_size=conv_kernel_size, conv_stride=conv_stride, pool_kernel_size=pool_kernel_size,
                     pool_stride=pool_stride, padding=padding, img_height=img_height, img_width=img_width, patch_height=patch_height,
-                    patch_width=patch_width, in_dim=in_dim, feat_dim=feat_dim, batch_size=batch_size, dropout=dropout)
+                    patch_width=patch_width, in_dim=in_dim, feat_dim=feat_dim, batch_size=batch_size, capture_size=capture_size, dropout=dropout, device=device)
 
-    input = torch.randn(16, 3, 256, 256)
+    input = torch.randn(batch_size, capture_size, input_channel, img_height, img_width)
     print(model(input).shape)
