@@ -34,7 +34,7 @@ class conv_network(nn.Module):
     def forward(self, x):
         for module in self.conv_network:
             x = module(x)
-        print("Tensor shape after convolution: {}".format(x.shape))
+        # print("Tensor shape after convolution: {}".format(x.shape))
         return x
 
 
@@ -112,19 +112,21 @@ class Encoder(nn.Module):
             self.conv_network = conv_network(num_conv_layers, input_channel, output_channel,conv_kernel_size,
                  conv_stride, pool_kernel_size, pool_stride, padding)
         # TODO: currently pooling is assumed to decreased image size by a factor of 0.5, need to adapt to general case
-        self.img_height = img_height // pow(2, num_conv_layers+1) if is_feature_extract else img_height
+        self.img_height = img_height // pow(2, num_conv_layers + 1) if is_feature_extract else img_height
         self.img_width = img_width // pow(2, num_conv_layers + 1) if is_feature_extract else img_width
         self.in_dim = output_channel if is_feature_extract else in_dim
         self.num_patches = (self.img_height // patch_height) * (self.img_width // patch_width)
         self.frame_patch_embed = frame_patch_embed(self.img_height, self.img_width, patch_height, patch_width, self.in_dim, feat_dim)
         self.pos_embedding = pos_embedding(feat_dim, self.num_patches, batch_size, capture_size, device)
         self.dropout = nn.Dropout(dropout)
+        self.norm = nn.LayerNorm(feat_dim)
 
     def forward(self,x):
         if self.is_feature_extract:
             x = self.conv_network(x)
         x = self.frame_patch_embed(x)
         x = self.pos_embedding(x)
+        x = self.norm(x)
         x = self.dropout(x)
         return x
 
