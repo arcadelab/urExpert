@@ -10,7 +10,7 @@ from skimage.transform import rescale
 
 class KinematicsDataset(Dataset):
     def __init__(self, kinematics_folder_path, video_capture_path, input_frames: int = 30, output_frames: int = 10,
-                 is_zero_mean: bool = False, is_zero_center: bool = False, is_overfit: bool = False,
+                 is_zero_mean: bool = False, is_zero_center: bool = False, is_overfit_extreme: bool = False,
                  is_gap: bool = False, is_decoder_only: bool = False):
         self.kinematics_folder_path = kinematics_folder_path
         self.video_capture_path = video_capture_path
@@ -28,7 +28,7 @@ class KinematicsDataset(Dataset):
         self.norm = True
         self.is_zero_mean = is_zero_mean
         self.is_zero_center = is_zero_center
-        self.is_overfit = is_overfit
+        self.is_overfit_extreme = is_overfit_extreme
         self.is_gap = is_gap
         self.is_decoder_only = is_decoder_only
         # read kinematics
@@ -47,7 +47,7 @@ class KinematicsDataset(Dataset):
                 start_seq = start_seq + self.kinematics_len[i]
 
     def __len__(self):
-        if self.is_overfit:
+        if self.is_overfit_extreme:
             return 1
         else:
             if self.is_gap:
@@ -98,10 +98,10 @@ class KinematicsDataset(Dataset):
             frame_path = os.path.join(self.video_capture_path, self.video_capture_files[self.current_file_idx*2])
             frame_input = cv2.cvtColor(cv2.imread(os.path.join(frame_path, os.listdir(frame_path)[frame_idx])), cv2.COLOR_BGR2RGB)
             frame_pred = cv2.cvtColor(cv2.imread(os.path.join(frame_path, os.listdir(frame_path)[frame_idx + self.input_frames])), cv2.COLOR_BGR2RGB)
-            if frame_input.shape[0] != 480 or frame_input.shape[0] != 640:
-                frame_input = rescale(frame_input, (2, 2), anti_aliasing=True)
-            if frame_pred.shape[0] != 480 or frame_pred.shape[0] != 640:
-                frame_pred = rescale(frame_pred, (2, 2), anti_aliasing=True)
+            if frame_input.shape[0] != 480 or frame_input.shape[1] != 640:
+                frame_input = rescale(frame_input, (2, 2, 1), anti_aliasing=True)
+            if frame_pred.shape[0] != 480 or frame_pred.shape[1] != 640:
+                frame_pred = rescale(frame_pred, (2, 2, 1), anti_aliasing=True)
             frame_input, frame_pred = torch.from_numpy(frame_input), torch.from_numpy(frame_pred)
             frames = torch.cat((frame_input.permute(2, 0, 1).unsqueeze(0), frame_pred.permute(2, 0, 1).unsqueeze(0)), dim=0)
             return psm1_pos, psm2_pos, frames

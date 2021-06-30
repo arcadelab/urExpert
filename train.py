@@ -2,7 +2,6 @@ import torch
 import os
 import tqdm
 import matplotlib.pyplot as plt
-import csv
 import numpy as np
 from dataset import KinematicsDataset
 from model import DecoderOnlyTransformer, EncoderDecoderTransformer
@@ -223,9 +222,9 @@ def plot_loss():
 if __name__ == "__main__":
     # user parameters
     # training specific
-    num_epochs = 4000
+    num_epochs = 5000
     num_eval_epoch = 100
-    lr = 0.0005
+    lr = 0.0001
     weight_decay = 0.0001
     is_penalize_all = True
     is_mask_enable = False
@@ -252,9 +251,9 @@ if __name__ == "__main__":
                                                                                           "overfit_extreme" if is_extreme else "overfit")
     test_data_path = os.path.join(task_folder, "test") if is_generalize else os.path.join(task_folder,
                                                                                           "overfit_extreme" if is_extreme else "overfit")
-    train_video_capture_path = os.path.join(video_capture_folder, "train") if is_decoder_only is False else None
-    eval_video_capture_path = os.path.join(video_capture_folder, "eval") if is_decoder_only is False else None
-    test_video_capture_path = os.path.join(video_capture_folder, "test") if is_decoder_only is False else None
+    train_video_capture_path = os.path.join(video_capture_folder, "train" if is_generalize else "overfit_extreme" if is_extreme else "overfit") if is_decoder_only is False else None
+    eval_video_capture_path = os.path.join(video_capture_folder, "eval" if is_generalize else "overfit_extreme" if is_extreme else "overfit") if is_decoder_only is False else None
+    test_video_capture_path = os.path.join(video_capture_folder, "test" if is_generalize else "overfit_extreme" if is_extreme else "overfit") if is_decoder_only is False else None
     input_frames = 150
     output_frames = 30
     is_zero_center = True
@@ -273,22 +272,22 @@ if __name__ == "__main__":
     patch_height = 32
     patch_width = 32
     in_dim = 3
-    batch_size = 32
+    batch_size = 16
     capture_size = 2
     dropout = 0.1
     # plot specific
     # suffix = "DecoderOnly-" + task + "-zerocenter-nonorm-penalall-in" + str(input_frames) + "out" + str(
         # output_frames) + "-" + scope + "-numdecode" + str(num_attn_layers) + "-classifier" if is_mask_enable else "-"
-    suffix = "encoderdecoder"
+    suffix = "encoderdecoder-encodernorm"
     pos_name = ["PSM1 tool tip position x", "PSM1 tool tip position y", "PSM1 tool tip position z"]
 
     # create dataset
     train_dataset = KinematicsDataset(train_data_path, train_video_capture_path, input_frames=input_frames, output_frames=output_frames,
-                                      is_zero_center=is_zero_center, is_overfit=is_overfit, is_gap=is_gap, is_decoder_only=is_decoder_only)
+                                      is_zero_center=is_zero_center, is_overfit_extreme=is_extreme, is_gap=is_gap, is_decoder_only=is_decoder_only)
     eval_dataset = KinematicsDataset(eval_data_path, eval_video_capture_path, input_frames=input_frames, output_frames=output_frames,
-                                     is_zero_center=is_zero_center, is_overfit=is_overfit, is_gap=is_gap, is_decoder_only=is_decoder_only)
+                                     is_zero_center=is_zero_center, is_overfit_extreme=is_extreme, is_gap=is_gap, is_decoder_only=is_decoder_only)
     test_dataset = KinematicsDataset(test_data_path, test_video_capture_path, input_frames=input_frames, output_frames=output_frames,
-                                     is_zero_center=is_zero_center, is_overfit=is_overfit, is_gap=is_gap, is_decoder_only=is_decoder_only)
+                                     is_zero_center=is_zero_center, is_overfit_extreme=is_extreme, is_gap=is_gap, is_decoder_only=is_decoder_only)
 
     # create dataloaders
     loader_train = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, drop_last=True)
