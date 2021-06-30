@@ -5,13 +5,13 @@ import matplotlib.pyplot as plt
 import csv
 import numpy as np
 from dataset import KinematicsDataset
-from model import DecoderOnlyTransformer
+from model import DecoderOnlyTransformer, EncoderDecoderTransformer
 from torch.utils.data import DataLoader
 from datetime import datetime
 import time
 
 
-def visualize():
+def visualize_decoder_only():
     # set evaluation mode
     model.eval()
     for batch_id, data in enumerate(loader_test):
@@ -48,7 +48,47 @@ def visualize():
                 plt.show()
 
 
-def train():
+def visualize_encoder_decoder():
+    # set evaluation mode
+    model.eval()
+    for batch_id, data in enumerate(loader_test):
+        # fetch data
+        psm1_pos, psm2_pos, frames = data
+        psm1_pos, psm2_pos, frames = psm1_pos.to(device).float(), psm2_pos.to(device).float(), frames.to(device).float()
+        with torch.no_grad():
+            # forward pass, compute, backpropagation, and record loss
+            if is_mask_enable:
+                input = {"kinematics": psm1_pos[:, :, :input_frames + output_frames - 1], "captures": frames}
+                # fetch 0-29, feed in 0-28
+                output = model(input)
+            else:
+                input = {"kinematics": psm1_pos[:, :, :input_frames], "captures": frames}
+                output = model(input)
+
+        # plot prediction vs gt
+        # separate past from future
+        output = output.cpu().detach().data.numpy()
+        psm1_pos = psm1_pos.cpu().detach().data.numpy()
+        psm1_cur_pos = psm1_pos[:, :, :input_frames]
+        psm1_nxt_pos = psm1_pos[:, :, input_frames:]
+
+        x = np.arange(input_frames + output_frames)
+        for i in range(output.shape[0]):
+            for j in range(output.shape[1]):
+                plt.figure()
+                plt.scatter(x[:input_frames], psm1_cur_pos[i, j], label='input', c="g")
+                plt.scatter(x[input_frames:], psm1_nxt_pos[i, j], label='ground truth', c="r")
+                plt.scatter(x[input_frames:], output[i, j], label='prediction', c="b")
+                plt.title('frame ' + str(i * 100) + ' to frame ' + str((i + 1) * 100))
+                plt.xlabel('frames')
+                plt.ylabel('true value')
+                plt.legend()
+                # pic_name = pos_name[j] + " start frame " + str(i * 100) + " batch " + str(batch_id + 1)
+                # plt.savefig(os.path.join(image_folder, pic_name), dpi=300, bbox_inches='tight')
+                plt.show()
+
+
+def train_decoder_only():
     # set training mode
     model.train()
     running_loss = 0
@@ -76,7 +116,38 @@ def train():
     return running_loss
 
 
-def eval():
+def train_encoder_decoder():
+    # set training mode
+    model.train()
+    running_loss = 0
+    for batch_id, data in enumerate(loader_train):
+        # fetch data
+        psm1_pos, psm2_pos, frames = data
+        psm1_pos, psm2_pos, frames = psm1_pos.to(device).float(), psm2_pos.to(device).float(), frames.to(device).float()
+        # set optimizer zero gradient
+        optimizer.zero_grad()
+        # forward pass, compute, backpropagation, and record loss
+        if is_mask_enable:
+            input = {"kinematics": psm1_pos[:, :, :input_frames + output_frames - 1], "captures": frames}
+            # fetch 0-29, feed in 0-28
+            output = model(input)
+            # out 0-28 (1-29 in practice), take 20-29, compare with gt 20-29
+            loss = loss_function(output, psm1_pos[:, :, 1:]) if is_penalize_all else loss_function(
+                output[:, :, input_frames - 1:], psm1_pos[:, :, input_frames:])
+        else:
+            input = {"kinematics": psm1_pos[:, :, :input_frames], "captures": frames}
+            output = model(input)
+            loss = loss_function(output, psm1_pos[:, :, input_frames:])
+        loss.backward()
+        running_loss += loss.item()
+        # step optimizer
+        optimizer.step()
+    train_loss.append(running_loss)
+    print("Train Loss = {} in epoch {}".format(running_loss, epoch))
+    return running_loss
+
+
+def eval_decoder_only():
     # set evaluation mode
     model.eval()
     running_loss = 0
@@ -93,6 +164,34 @@ def eval():
                     psm1_pos[:, :, input_frames:])  # out 0-28 (1-29 in practice), take 20-29, compare with gt 20-29
             else:
                 output = model(psm1_pos[:, :, :input_frames])
+                loss = loss_function(output, psm1_pos[:, :, input_frames:])
+        running_loss += loss.item()
+    scheduler.step(running_loss)
+    eval_loss.append(running_loss)
+    print("Eval Loss = {} in epoch {}".format(running_loss, epoch + 1))
+    return running_loss
+
+
+def eval_encoder_decoder():
+    # set evaluation mode
+    model.eval()
+    running_loss = 0
+    for batch_id, data in enumerate(loader_eval):
+        # fetch data
+        psm1_pos, psm2_pos, frames = data
+        psm1_pos, psm2_pos, frames = psm1_pos.to(device).float(), psm2_pos.to(device).float(), frames.to(device).float()
+        with torch.no_grad():
+            # forward pass, compute, backpropagation, and record loss
+            if is_mask_enable:
+                input = {"kinematics": psm1_pos[:, :, :input_frames + output_frames - 1], "captures": frames}
+                # fetch 0-29, feed in 0-28
+                output = model(input)
+                # out 0-28 (1-29 in practice), take 20-29, compare with gt 20-29
+                loss = loss_function(output, psm1_pos[:, :, 1:]) if is_penalize_all else loss_function(
+                    output[:, :, input_frames - 1:], psm1_pos[:, :, input_frames:])
+            else:
+                input = {"kinematics": psm1_pos[:, :, :input_frames], "captures": frames}
+                output = model(input)
                 loss = loss_function(output, psm1_pos[:, :, input_frames:])
         running_loss += loss.item()
     scheduler.step(running_loss)
@@ -124,13 +223,21 @@ def plot_loss():
 if __name__ == "__main__":
     # user parameters
     # training specific
-    num_epochs = 8000
+    num_epochs = 4000
     num_eval_epoch = 100
-    lr = 0.0001
+    lr = 0.0005
     weight_decay = 0.0001
     is_penalize_all = True
     is_mask_enable = False
     save_ckpt = True
+    # model specific
+    is_decoder_only = False
+    feat_dim = 1024
+    nhead = 8
+    num_attn_layers = 6
+    input_channel = 3
+    load_checkpoint = False
+    use_norm = False
     # dataset specific
     is_generalize = True
     is_extreme = False
@@ -138,48 +245,72 @@ if __name__ == "__main__":
     scope = "general" if is_generalize else "overfit"
     task = "Needle_Passing"
     task_folder = os.path.join("./data", task)
+    video_capture_folder = os.path.join(os.path.join("E:\Research\Arcade\jigsaw_dataset", task), "video_captures")
     train_data_path = os.path.join(task_folder, "train") if is_generalize else os.path.join(task_folder,
                                                                                             "overfit_extreme" if is_extreme else "overfit")
     eval_data_path = os.path.join(task_folder, "eval") if is_generalize else os.path.join(task_folder,
                                                                                           "overfit_extreme" if is_extreme else "overfit")
     test_data_path = os.path.join(task_folder, "test") if is_generalize else os.path.join(task_folder,
                                                                                           "overfit_extreme" if is_extreme else "overfit")
+    train_video_capture_path = os.path.join(video_capture_folder, "train") if is_decoder_only is False else None
+    eval_video_capture_path = os.path.join(video_capture_folder, "eval") if is_decoder_only is False else None
+    test_video_capture_path = os.path.join(video_capture_folder, "test") if is_decoder_only is False else None
     input_frames = 150
     output_frames = 30
     is_zero_center = True
     is_gap = True
-    # model specific
-    feat_dim = 512
-    nhead = 8
-    num_attn_layers = 6
-    input_channel = 3
-    load_checkpoint = False
-    use_norm = False
+    # encoder specific
+    is_feature_extract = False
+    num_conv_layers = 3
+    output_channel = 256
+    conv_kernel_size = 3
+    conv_stride = 1
+    pool_kernel_size = 2
+    pool_stride = 2
+    padding = 1
+    img_height = 480
+    img_width = 640
+    patch_height = 32
+    patch_width = 32
+    in_dim = 3
+    batch_size = 32
+    capture_size = 2
+    dropout = 0.1
     # plot specific
-    suffix = "DecoderOnly-" + task + "-zerocenter-nonorm-penalall-in" + str(input_frames) + "out" + str(
-        output_frames) + "-" + scope + "-numdecode" + str(num_attn_layers) + "-classifier" if is_mask_enable else "-"
+    # suffix = "DecoderOnly-" + task + "-zerocenter-nonorm-penalall-in" + str(input_frames) + "out" + str(
+        # output_frames) + "-" + scope + "-numdecode" + str(num_attn_layers) + "-classifier" if is_mask_enable else "-"
+    suffix = "encoderdecoder"
     pos_name = ["PSM1 tool tip position x", "PSM1 tool tip position y", "PSM1 tool tip position z"]
 
     # create dataset
-    batch_size = 5
-    train_dataset = KinematicsDataset(train_data_path, input_frames=input_frames, output_frames=output_frames,
-                                      is_zero_center=is_zero_center, is_overfit=is_overfit, is_gap=is_gap)
-    eval_dataset = KinematicsDataset(eval_data_path, input_frames=input_frames, output_frames=output_frames,
-                                     is_zero_center=is_zero_center, is_overfit=is_overfit, is_gap=is_gap)
-    test_dataset = KinematicsDataset(test_data_path, input_frames=input_frames, output_frames=output_frames,
-                                     is_zero_center=is_zero_center, is_overfit=is_overfit, is_gap=is_gap)
+    train_dataset = KinematicsDataset(train_data_path, train_video_capture_path, input_frames=input_frames, output_frames=output_frames,
+                                      is_zero_center=is_zero_center, is_overfit=is_overfit, is_gap=is_gap, is_decoder_only=is_decoder_only)
+    eval_dataset = KinematicsDataset(eval_data_path, eval_video_capture_path, input_frames=input_frames, output_frames=output_frames,
+                                     is_zero_center=is_zero_center, is_overfit=is_overfit, is_gap=is_gap, is_decoder_only=is_decoder_only)
+    test_dataset = KinematicsDataset(test_data_path, test_video_capture_path, input_frames=input_frames, output_frames=output_frames,
+                                     is_zero_center=is_zero_center, is_overfit=is_overfit, is_gap=is_gap, is_decoder_only=is_decoder_only)
 
     # create dataloaders
-    loader_train = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, drop_last=False)
-    loader_eval = DataLoader(eval_dataset,  batch_size=batch_size, shuffle=False, drop_last=False)
-    loader_test = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, drop_last=False)
+    loader_train = DataLoader(train_dataset, batch_size=batch_size, shuffle=False, drop_last=True)
+    loader_eval = DataLoader(eval_dataset,  batch_size=batch_size, shuffle=False, drop_last=True)
+    loader_test = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, drop_last=True)
 
     # initialize model
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     model = DecoderOnlyTransformer(feat_dim=feat_dim, nhead=nhead, num_attn_layers=num_attn_layers,
                                    channel=input_channel, device=device, use_norm=use_norm,
                                    is_mask_enable=is_mask_enable, input_frames=input_frames,
-                                   output_frames=output_frames)
+                                   output_frames=output_frames) if is_decoder_only else \
+        EncoderDecoderTransformer(feat_dim=feat_dim, nhead=nhead, num_attn_layers=num_attn_layers,
+                                  channel=input_channel, device=device, use_norm=use_norm,
+                                  is_mask_enable=is_mask_enable, input_frames=input_frames,
+                                  output_frames=output_frames, is_feature_extract=is_feature_extract,
+                                  num_conv_layers=num_conv_layers, input_channel=input_channel,
+                                  output_channel=output_channel, conv_kernel_size=conv_kernel_size,
+                                  conv_stride=conv_stride, pool_kernel_size=pool_kernel_size,
+                                  pool_stride=pool_stride, padding=padding, img_height=img_height, img_width=img_width,
+                                  patch_height=patch_height, patch_width=patch_width, in_dim=in_dim,
+                                  batch_size=batch_size, capture_size=capture_size, dropout=dropout)
     model.cuda()
     # check numbers of parameters
     # print(sum(p.numel() for p in model.parameters() if p.requires_grad))
@@ -219,10 +350,10 @@ if __name__ == "__main__":
     for epoch in tqdm.tqdm(range(num_epochs)):
         if (epoch + 1) % num_eval_epoch != 0:
             print("Train Epoch {}".format(epoch + 1))
-            loss_train = train()
+            loss_train = train_decoder_only() if is_decoder_only else train_encoder_decoder()
         else:
             print("Validation {}".format((epoch + 1) / num_eval_epoch))
-            loss_eval = eval()
+            loss_eval = eval_decoder_only() if is_decoder_only else eval_encoder_decoder()
             if best_val_loss == 0:
                 best_val_loss = loss_eval
             if best_val_loss > loss_eval:
@@ -230,4 +361,4 @@ if __name__ == "__main__":
                 print("New validation best, save model...")
                 save_model()
     plot_loss()
-    visualize()
+    visualize_decoder_only() if is_decoder_only else visualize_encoder_decoder()
