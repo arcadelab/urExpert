@@ -78,83 +78,9 @@ class PositionalEncoding(nn.Module):
         pe = pe.unsqueeze(0).transpose(0, 1)
         self.register_buffer('pe', pe)
 
-    def forward(self, x):
-        x = x + self.pe[:x.size(0), :]
+    def forward(self, kin):
+        x = kin + self.pe[:kin.size(0), :]
         return self.dropout(x)
-
-
-class DecoderLayer(nn.Module):
-    """
-    Transformer Decoder Layer:
-    Applies self-attention on embedded kinematics sequences, followed by cross-attention on encoded video captures
-    :param x: embedded kinematics sequences
-    :param y: encoded video captures
-    """
-
-    def __init__(self, interm_dim: int = 2048, feat_dim: int = 512, nhead: int = 8, dropout: int = 0, device: str = 'cuda', use_norm: bool = False, is_mask_enable: bool = False):
-        super(DecoderLayer, self).__init__()
-        self.attn_layer = MultiHeadSelfAttention(d_model=feat_dim, nhead=nhead, dropout=dropout)
-
-        self.linear1 = nn.Linear(feat_dim, interm_dim)
-        self.linear2 = nn.Linear(interm_dim, feat_dim)
-
-        self.norm1 = nn.LayerNorm(feat_dim)
-        self.norm2 = nn.LayerNorm(feat_dim)
-        self.norm3 = nn.LayerNorm(feat_dim)
-
-        self.dropout = nn.Dropout(dropout)
-        self.activation = nn.ReLU()
-
-        self.device = device
-        self.use_norm = use_norm
-        self.is_mask_enable = is_mask_enable
-
-    def forward(self, x, y):
-        # generate mask
-        mask = generate_attn_mask(x.size(1)).to(self.device) if self.is_mask_enable else None
-        # self-attn
-        x = self.attn_layer(q=x, k=x, v=x, mask=mask) + x
-        if self.use_norm:
-            x = self.norm1(x)
-        # cross-attn
-        x = self.attn_layer(q=x, k=y, v=y, mask=None) + x
-        # feed forward
-        if self.use_norm:
-            x = self.norm2(x)
-        x = self.linear2(self.activation(self.linear1(x))) + x
-        if self.use_norm:
-            x = self.norm3(x)
-        return x
-
-
-class Decoder(nn.Module):
-    """
-    Transformer Decoder:
-    Stacked collections of decoder layers
-    :param x: embedded kinematics sequences
-    :param y: encoded video captures
-    """
-
-    def __init__(self, interm_dim: int = 2048, feat_dim: int = 256, nhead: int = 8, num_attn_layers: int = 10,
-                 dropout: int = 0, device: str = 'cuda', use_norm: bool = False, is_mask_enable: bool = False):
-        super().__init__()
-
-        self.pos_encoder = PositionalEncoding(d_model=feat_dim, dropout=0, max_len=5000)
-        self.decoder_layer = DecoderLayer(interm_dim=interm_dim, feat_dim=feat_dim, nhead=nhead, dropout=dropout,
-                                          device=device, use_norm=use_norm, is_mask_enable=is_mask_enable)
-        self.decoders = get_clones(self.decoder_layer, num_attn_layers)
-
-    def forward(self, x, y):
-        """
-        :param x: embedded kinematics sequences
-        :param y: encoded video captures
-        """
-        x = self.pos_encoder.forward(x)
-
-        for module in self.decoders:
-            x = module(x, y)
-
-        return x
 
 
 class Classifier(nn.Module):
@@ -171,25 +97,116 @@ class Classifier(nn.Module):
         return self.classifier(x)
 
 
+class DecoderLayer(nn.Module):
+    """
+    Transformer Decoder Layer:
+    Applies self-attention on embedded kinematics sequences, followed by cross-attention on encoded video captures
+        :param kin: embedded kinematics sequences
+        :param vid: encoded video captures
+    """
+
+    def __init__(self, interm_dim: int = 2048, feat_dim: int = 512, nhead: int = 8, dropout: int = 0, device: str = 'cuda', use_norm: bool = False, is_mask_enable: bool = False, is_decoder_only: bool = False):
+        super(DecoderLayer, self).__init__()
+        self.attn_layer = MultiHeadSelfAttention(d_model=feat_dim, nhead=nhead, dropout=dropout)
+
+        self.linear1 = nn.Linear(feat_dim, interm_dim)
+        self.linear2 = nn.Linear(interm_dim, feat_dim)
+
+        self.norm1 = nn.LayerNorm(feat_dim)
+        self.norm2 = nn.LayerNorm(feat_dim)
+        self.norm3 = nn.LayerNorm(feat_dim)
+
+        self.dropout = nn.Dropout(dropout)
+        self.activation = nn.ReLU()
+
+        self.device = device
+        self.use_norm = use_norm
+        self.is_mask_enable = is_mask_enable
+        self.is_decoder_only = is_decoder_only
+
+    def forward(self, kin, vid):
+        # generate mask
+        mask = generate_attn_mask(kin.size(1)).to(self.device) if self.is_mask_enable else None
+
+        # self-attn
+        x = self.attn_layer(q=kin, k=kin, v=kin, mask=mask) + kin
+
+        if self.use_norm:
+            x = self.norm1(x)
+
+        # cross-attn
+        if self.is_decoder_only is False:
+            x = self.attn_layer(q=x, k=vid, v=vid, mask=None) + x
+
+        # feed forward
+        if self.use_norm:
+            x = self.norm2(x)
+
+        x = self.linear2(self.activation(self.linear1(x))) + x
+
+        if self.use_norm:
+            x = self.norm3(x)
+        return x
+
+
+class Decoder(nn.Module):
+    """
+    Transformer Decoder:
+    Stacked collections of decoder layers
+        :param kin: embedded kinematics sequences
+        :param vid: encoded video captures
+    """
+
+    def __init__(self, interm_dim: int = 2048, feat_dim: int = 256, nhead: int = 8, num_decoder_layers: int = 10,
+                 dropout: int = 0, device: str = 'cuda', use_norm: bool = False, is_mask_enable: bool = False,
+                 is_decoder_only: bool = False):
+        super().__init__()
+
+        self.pos_encoder = PositionalEncoding(d_model=feat_dim, dropout=0, max_len=5000)
+        self.decoder_layer = DecoderLayer(interm_dim=interm_dim, feat_dim=feat_dim, nhead=nhead, dropout=dropout,
+                                          device=device, use_norm=use_norm, is_mask_enable=is_mask_enable,
+                                          is_decoder_only=is_decoder_only)
+        self.decoders = get_clones(self.decoder_layer, num_decoder_layers)
+
+    def forward(self, kin, vid):
+        """
+        :param kin: embedded kinematics sequences
+        :param vid: encoded video captures
+        """
+        if kin.isnan().any():
+            print("before decoder pos embedding:")
+
+        x = self.pos_encoder.forward(kin)
+
+        if x.isnan().any():
+            print("after decoder pos embedding:")
+
+        for module in self.decoders:
+            x = module(x, vid)
+
+        return x
+
+
 class DecoderOnlyTransformer(nn.Module):
     """
     Transformer computes self (intra image) and cross (inter image) attention
     """
 
-    def __init__(self, feat_dim: int = 512, nhead: int = 8, num_attn_layers: int = 6, channel: int = 3,
-                 device: str = 'cuda', use_norm: bool = False, is_mask_enable: bool = False, input_frames: int = 300, output_frames: int = 30):
+    def __init__(self, feat_dim: int = 512, nhead: int = 8, num_decoder_layers: int = 6, channel: int = 3,
+                 device: str = 'cuda', use_norm: bool = False, is_mask_enable: bool = False, input_frames: int = 300, output_frames: int = 30,
+                 is_decoder_only: bool = False):
         super().__init__()
         self.feat_dim = feat_dim
         self.nhead = nhead
-        self.num_attn_layers = num_attn_layers
+        self.num_decoder_layers = num_decoder_layers
         self.channel = channel
         self.input_frames = input_frames
         self.output_frames = output_frames
         self.is_mask_enable = is_mask_enable
 
         self.embeddings = nn.Linear(channel, feat_dim)
-        self.decoder = Decoder(interm_dim=2048, feat_dim=feat_dim, nhead=nhead, num_attn_layers=num_attn_layers,
-                               dropout=0, device=device, use_norm=use_norm, is_mask_enable=is_mask_enable)
+        self.decoder = Decoder(interm_dim=2048, feat_dim=feat_dim, nhead=nhead, num_decoder_layers=num_decoder_layers,
+                               dropout=0, device=device, use_norm=use_norm, is_mask_enable=is_mask_enable, is_decoder_only=is_decoder_only)
         self.final = nn.Linear(feat_dim, channel)
         self.final_classifier = Classifier(in_channels=feat_dim*input_frames, out_channels=channel*output_frames)
 
@@ -201,12 +218,14 @@ class DecoderOnlyTransformer(nn.Module):
         :return: cross attention values [N,H,W,W], dim=2 is left image, dim=3 is right image
         """
 
-        # kinematics embeddings
+        # kinematics embeddings-
+        if psm1.isnan().any():
+            print("data loading:")
         x = self.embeddings(psm1.permute(0, 2, 1))
         # print("embedding shape = {}".format(x.shape))
 
         # Decode
-        decoder_output = self.decoder(x)
+        decoder_output = self.decoder(x, x)
 
         # Final layer
         if self.is_mask_enable:
@@ -219,14 +238,14 @@ class DecoderOnlyTransformer(nn.Module):
 
 
 class EncoderDecoderTransformer(nn.Module):
-    def __init__(self, feat_dim, nhead, num_attn_layers, channel, device, use_norm, is_mask_enable, input_frames,
+    def __init__(self, feat_dim, nhead, num_decoder_layers, channel, device, use_norm, is_mask_enable, input_frames,
                  output_frames, is_feature_extract, num_conv_layers, input_channel, output_channel, conv_kernel_size,
                  conv_stride, pool_kernel_size, pool_stride, padding, img_height, img_width, patch_height, patch_width,
-                 in_dim, batch_size, capture_size, dropout):
+                 in_dim, batch_size, capture_size, dropout, interm_dim, num_encoder_layer, is_encode):
         super().__init__()
         self.feat_dim = feat_dim
         self.nhead = nhead
-        self.num_attn_layers = num_attn_layers
+        self.num_decoder_layers = num_decoder_layers
         self.channel = channel
         self.input_frames = input_frames
         self.output_frames = output_frames
@@ -236,10 +255,11 @@ class EncoderDecoderTransformer(nn.Module):
         self.encoder = Encoder(is_feature_extract=is_feature_extract, num_conv_layers=num_conv_layers, input_channel=input_channel,
                     output_channel=output_channel, conv_kernel_size=conv_kernel_size, conv_stride=conv_stride, pool_kernel_size=pool_kernel_size,
                     pool_stride=pool_stride, padding=padding, img_height=img_height, img_width=img_width, patch_height=patch_height,
-                    patch_width=patch_width, in_dim=in_dim, feat_dim=feat_dim, batch_size=batch_size, capture_size=capture_size, dropout=dropout, device=device)
+                    patch_width=patch_width, in_dim=in_dim, feat_dim=feat_dim, batch_size=batch_size, capture_size=capture_size, dropout=dropout, device=device,
+                    interm_dim=interm_dim, nhead=nhead, num_encoder_layer=num_encoder_layer, is_encode=is_encode)
 
         self.embeddings = nn.Linear(channel, feat_dim)
-        self.decoder = Decoder(interm_dim=2048, feat_dim=feat_dim, nhead=nhead, num_attn_layers=num_attn_layers,
+        self.decoder = Decoder(interm_dim=2048, feat_dim=feat_dim, nhead=nhead, num_decoder_layers=num_decoder_layers,
                                dropout=0, device=device, use_norm=use_norm, is_mask_enable=is_mask_enable)
         self.final = nn.Linear(feat_dim, channel)
         self.final_classifier = Classifier(in_channels=feat_dim * input_frames, out_channels=channel * output_frames)
@@ -259,8 +279,14 @@ class EncoderDecoderTransformer(nn.Module):
         embedded_kin = self.embeddings(input["kinematics"].permute(0, 2, 1))
         # print("embedding shape = {}".format(embedded_kin.shape))
 
+        if encoded_cap.isnan().any():
+            print("after initial encoding: vid")
+
+        if embedded_kin.isnan().any():
+            print("after initial embedding: kin")
+
         # Decode
-        decoder_output = self.decoder(embedded_kin, encoded_cap.reshape(self.batch_size, -1, self.feat_dim))
+        decoder_output = self.decoder(embedded_kin, encoded_cap)
 
         # Final layer
         if self.is_mask_enable:

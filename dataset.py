@@ -11,11 +11,12 @@ from skimage.transform import rescale
 class KinematicsDataset(Dataset):
     def __init__(self, kinematics_folder_path, video_capture_path, input_frames: int = 30, output_frames: int = 10,
                  is_zero_mean: bool = False, is_zero_center: bool = False, is_overfit_extreme: bool = False,
-                 is_gap: bool = False, is_decoder_only: bool = False):
+                 is_gap: bool = False, is_decoder_only: bool = False, interval_size: int = 10, scale: int = 1000,
+                 norm: bool = True):
         self.kinematics_folder_path = kinematics_folder_path
         self.video_capture_path = video_capture_path
-        self.kinematics_files = os.listdir(kinematics_folder_path)
-        self.video_capture_files = os.listdir(video_capture_path)
+        self.kinematics_files = sorted(os.listdir(kinematics_folder_path))
+        self.video_capture_files = sorted(os.listdir(video_capture_path))
         self.kinematics = None
         self.kinematics_len = list()
         self.current_file_idx = 0
@@ -23,9 +24,11 @@ class KinematicsDataset(Dataset):
         self.input_frames = input_frames
         self.output_frames = output_frames
         self.batch_frames = input_frames + output_frames
+        self.interval_size = interval_size
         self.features = 3
         self.feature_axis = [38, 39, 40]  # 57, 58, 59
-        self.norm = True
+        self.norm = norm
+        self.scale = scale
         self.is_zero_mean = is_zero_mean
         self.is_zero_center = is_zero_center
         self.is_overfit_extreme = is_overfit_extreme
@@ -43,8 +46,10 @@ class KinematicsDataset(Dataset):
             start_seq = 0
             for i in range(len(self.kinematics_len)):
                 self.kinematics[start_seq:start_seq + self.kinematics_len[i], self.feature_axis] = self.kinematics[start_seq:start_seq + self.kinematics_len[i], \
-                    self.feature_axis] / np.linalg.norm(self.kinematics[start_seq:start_seq + self.kinematics_len[i], self.feature_axis]) * 1000
+                    self.feature_axis] / np.linalg.norm(self.kinematics[start_seq:start_seq + self.kinematics_len[i], self.feature_axis]) * self.scale
                 start_seq = start_seq + self.kinematics_len[i]
+        else:
+            self.kinematics = self.kinematics * self.scale
 
     def __len__(self):
         if self.is_overfit_extreme:
@@ -53,7 +58,7 @@ class KinematicsDataset(Dataset):
             if self.is_gap:
                 return np.sum(self.kinematics_len) // self.batch_frames
             else:
-                return np.sum(self.kinematics_len) - self.batch_frames
+                return (np.sum(self.kinematics_len) - len(self.kinematics_len) * self.batch_frames) // self.interval_size
 
     def __getitem__(self, idx):
         # initialize length limit
@@ -67,10 +72,11 @@ class KinematicsDataset(Dataset):
                 self.current_file_idx += 1
                 self.length_limit += self.kinematics_len[self.current_file_idx]
         else:
-            fstart = idx + self.current_file_idx * self.batch_frames
-            if idx + self.batch_frames > self.length_limit:
-                fstart = idx + self.batch_frames
-                self.current_file_idx = self.current_file_idx + 1
+            fstart = idx * self.interval_size + self.current_file_idx * self.batch_frames
+            if fstart + self.batch_frames >= self.length_limit:
+                fstart = fstart + self.batch_frames
+                self.current_file_idx += 1
+                self.length_limit += self.kinematics_len[self.current_file_idx]
             x = fstart
 
         # extract 200 frames from PSM1 and PSM2
@@ -94,8 +100,14 @@ class KinematicsDataset(Dataset):
 
         # load starting frame of input and prediction
         if self.is_decoder_only is False:
+            # print("x = {}".format(x))
+            # print(self.length_limit)
+            # print(self.kinematics_len[self.current_file_idx])
+            # print(self.current_file_idx)
             frame_idx = x - self.length_limit + self.kinematics_len[self.current_file_idx]
+            # print("frame idx = {}".format(frame_idx))
             frame_path = os.path.join(self.video_capture_path, self.video_capture_files[self.current_file_idx*2])
+            # print(frame_path)
             frame_input = cv2.cvtColor(cv2.imread(os.path.join(frame_path, os.listdir(frame_path)[frame_idx])), cv2.COLOR_BGR2RGB)
             frame_pred = cv2.cvtColor(cv2.imread(os.path.join(frame_path, os.listdir(frame_path)[frame_idx + self.input_frames])), cv2.COLOR_BGR2RGB)
             if frame_input.shape[0] != 480 or frame_input.shape[1] != 640:
@@ -110,13 +122,18 @@ class KinematicsDataset(Dataset):
 
 
 if __name__ == "__main__":
-    train_dataset = KinematicsDataset("./data/Needle_Passing/train",
-                                      "E:/Research/Arcade/jigsaw_dataset/Needle_Passing/video_captures/train",
-                                      input_frames=150, output_frames=30, is_zero_center=True, is_gap=True, is_decoder_only=False)
+    task = "Needle_Passing"
+    data_path = "./jigsaw_dataset_colab"
+    task_folder = os.path.join(os.path.join(data_path, task), "kinematics")
+    video_capture_folder = os.path.join(os.path.join(data_path, task), "video_captures")
+    train_data_path = os.path.join(task_folder, "train")
+    train_video_capture_path = os.path.join(video_capture_folder, "train")
 
-    loader_train = DataLoader(train_dataset, batch_size=32, shuffle=False, drop_last=True)
+    train_dataset = KinematicsDataset(train_data_path, train_video_capture_path, input_frames=150, output_frames=30, is_zero_center=True, is_gap=True, is_decoder_only=False)
+    loader_train = DataLoader(train_dataset, batch_size=16, shuffle=False, drop_last=True)
 
     for i in range(2):
+        print("epoch {} started...".format(i))
         for batch_id, data in enumerate(loader_train):
             psm1_pos, psm2_pos, frames = data
             # print(frames.shape)
