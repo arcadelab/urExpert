@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 from dataset import KinematicsDataset
 from model import DecoderOnlyTransformer, EncoderDecoderTransformer
 from torch.utils.data import DataLoader
+from utils import plot_predict
 
 
 def infer_decoder_only():
@@ -63,44 +64,37 @@ def infer_encoder_decoder():
     # define target sequence length
     for batch_id, data in enumerate(loader_test):
         # fetch data
-        psm1_pos, psm2_pos, frames = data
-        psm1_pos, psm2_pos, frames, gt = psm1_pos.to(device).float()[:, :, :input_frames], psm2_pos.to(device).float(), frames.to(device).float(), psm1_pos.to(device).float()
+        psm_pos, frames = data
+        psm_pos, frames, gt = psm_pos.to(device).float()[:, :, :input_frames], frames.to(device).float(), psm_pos.to(device).float()
         if is_mask_enable:
             for frame in range(output_frames):
                 with torch.no_grad():
-                    input = {"kinematics": psm1_pos, "captures": frames}
+                    input = {"kinematics": psm_pos, "captures": frames}
                     output = model(input)  # fetch 0-29, feed in 0-28
                 # extract last element from output as new prediction
                 pred = output[:, :, -1].unsqueeze(2)
                 # concatenate new prediction to input sequence
-                psm1_pos = torch.cat((psm1_pos, pred), dim=2)
+                psm1_pos = torch.cat((psm_pos, pred), dim=2)
         else:
-            input = {"kinematics": psm1_pos, "captures": frames}
+            input = {"kinematics": psm_pos, "captures": frames}
             output = model(input)
 
         # compute prediction L1 Loss
-        loss = loss_function(psm1_pos[:, :, input_frames:] if is_mask_enable else output, gt[:, :, input_frames:])
+        loss = loss_function(psm_pos[:, :, input_frames:] if is_mask_enable else output, gt[:, :, input_frames:])
         infer_loss.append(loss.item())
 
         # plot inference result
         print("plot...")
         gt = gt.cpu().detach().data.numpy()
         output = output.cpu().detach().data.numpy()
-        psm1_pos = psm1_pos.cpu().detach().data.numpy()
-        x_ = np.arange(input_frames + output_frames)
-        for j in range(psm1_pos.shape[0]):
-            for i in range(psm1_pos.shape[1]):
-                plt.figure()
-                plt.scatter(x_[:input_frames], psm1_pos[j, i, :input_frames], label='input', c="g")
-                plt.scatter(x_[input_frames:], gt[j, i, input_frames:], label='ground truth', c="r")
-                plt.scatter(x_[input_frames:], psm1_pos[j, i, input_frames:] if is_mask_enable else output[j, i], label='prediction', c="b")
-                plt.xlabel('frames')
-                plt.ylabel('true value')
-                plt.title('frame ' + str(j * 100) + ' to frame ' + str((j + 1) * 100))
-                plt.legend()
-                pic_name = pos_name[i] + " start frame " + str(j * 100) + " batch " + str(batch_id + 1)
-                plt.savefig(os.path.join(inference_image_folder, pic_name), dpi=300, bbox_inches='tight')
-                # plt.show()
+        psm_pos = psm_pos.cpu().detach().data.numpy()
+
+        plot_pred(output[:, :input_channel // 2], psm_pos[:, :input_channel // 2],
+                  gt[:, :input_channel // 2, input_frames:])
+
+        plot_pred(output[:, input_channel // 2:], psm_pos[:, input_channel // 2:],
+                  gt[:, input_channel // 2:, input_frames:])
+
     print("Average loss is {}.".format(np.mean(infer_loss)))
 
 
@@ -121,7 +115,7 @@ if __name__ == "__main__":
 
 
     # model specific
-    is_decoder_only = True
+    is_decoder_only = False
     is_encode = True
     load_checkpoint = False
     use_norm = False
@@ -130,13 +124,13 @@ if __name__ == "__main__":
     nhead = 8
     num_decoder_layers = 6
     num_encoder_layer = 6
-    input_channel = 3
+    input_channel = 6
 
     # dataset specific
     norm = False
-    is_generalize = True
-    is_extreme = False
-    is_overfit = False
+    is_generalize = False
+    is_extreme = True
+    is_overfit = True
     is_zero_center = True
     is_gap = True
     drop_last = False
@@ -162,21 +156,22 @@ if __name__ == "__main__":
     pool_kernel_size = 2
     pool_stride = 2
     padding = 1
-    img_height = 480
-    img_width = 640
+    img_height = 240
+    img_width = 320
     patch_height = 16
     patch_width = 16
     in_dim = 3
     batch_size = 32 if is_generalize else 1 if is_extreme else 2
-    capture_size = 2
+    capture_size = 1
     dropout = 0.1
+    project_type = "conv"
 
     # plot specific
     # suffix = "DecoderOnly-" + task + "-zerocenter-nonorm-penalall-in" + str(input_frames) + "out" + str(
     # output_frames) + "-" + scope + "-numdecode" + str(num_attn_layers) + "-classifier" if is_mask_enable else "-"
-    suffix = "decoder-gap-nomask-noprenorm"
+    suffix = "encoderdecoder-ch2-gap-nomask-noprenorm-selfattn-decodernorm-overfit-onecap"
     pos_name = ["PSM1 tool tip position x", "PSM1 tool tip position y", "PSM1 tool tip position z"]
-    time = "15_35"
+    time = "22_40"
 
     # create dataset
     test_dataset = KinematicsDataset(test_data_path, test_video_capture_path, input_frames=input_frames,
@@ -202,7 +197,8 @@ if __name__ == "__main__":
                                   pool_stride=pool_stride, padding=padding, img_height=img_height, img_width=img_width,
                                   patch_height=patch_height, patch_width=patch_width, in_dim=in_dim,
                                   batch_size=batch_size, capture_size=capture_size, dropout=dropout,
-                                  interm_dim=interm_dim, num_encoder_layer=num_encoder_layer, is_encode=is_encode)
+                                  interm_dim=interm_dim, num_encoder_layer=num_encoder_layer, is_encode=is_encode,
+                                  project_type=project_type)
     model.cuda()
 
     # load checkpoint

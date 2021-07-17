@@ -1,86 +1,5 @@
-import numpy as np
-import copy
-import torch
-import torch.nn as nn
-from torch.nn import functional as F
-from encoder import Encoder
-import math
-
-
-def get_clones(module, N):
-    return nn.ModuleList([copy.deepcopy(module) for _ in range(N)])
-
-
-def generate_attn_mask(length):
-    """
-    generate self-attention mask
-    :param length: length of input kinematics sequence
-    :return: upper triangular mask indices
-    """
-    mask = np.triu(np.ones((1, length, length)), k=1).astype(np.bool_)
-    mask_indices = torch.from_numpy(mask) == 0
-    return mask_indices
-
-
-def attention(q, k, v, d_k, mask=None, dropout=None):
-    score = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(d_k)
-    # apply mask if needed
-    if mask is not None:
-        mask = mask.unsqueeze(1)
-        score = score.masked_fill(mask == 0, -1e9)
-    # apply dropout if needed
-    score = F.softmax(score, dim=-1)
-    if dropout is not None:
-        score = dropout(score)
-    # return attention
-    attn = torch.matmul(score, v)
-    return attn
-
-
-class MultiHeadSelfAttention(nn.Module):
-    def __init__(self, d_model, nhead, dropout):
-        super(MultiHeadSelfAttention, self).__init__()
-        assert d_model % nhead == 0
-        self.d_model = d_model
-        self.d_k = d_model // nhead
-        self.nhead = nhead
-
-        self.dropout = nn.Dropout(dropout)
-        self.w_q = nn.Linear(d_model, d_model)
-        self.w_k = nn.Linear(d_model, d_model)
-        self.w_v = nn.Linear(d_model, d_model)
-        self.linear = nn.Linear(d_model, d_model)
-
-    def forward(self, q, k, v, mask):
-        if torch.equal(q, k) and torch.equal(k, v):
-            assert q.shape[1] == k.shape[1] and k.shape[1] == v.shape[1], "self-attention input doesn't have equal length"
-        nbatch = q.shape[0]
-        _q = self.w_q(q).view(nbatch, -1, self.nhead, self.d_k).transpose(1, 2)
-        _k = self.w_k(k).view(nbatch, -1, self.nhead, self.d_k).transpose(1, 2)
-        _v = self.w_v(v).view(nbatch, -1, self.nhead, self.d_k).transpose(1, 2)
-
-        attn = attention(_q, _k, _v, self.d_k, mask=mask, dropout=self.dropout)
-        attn = attn.transpose(1, 2).contiguous().view(nbatch, -1, self.d_model)
-        attn = self.linear(attn)
-
-        return attn
-
-
-class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, dropout=0.1, max_len=500):
-        super(PositionalEncoding, self).__init__()
-        self.dropout = nn.Dropout(p=dropout)
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        pe = pe.unsqueeze(0).transpose(0, 1)
-        self.register_buffer('pe', pe)
-
-    def forward(self, kin):
-        x = kin + self.pe[:kin.size(0), :]
-        return self.dropout(x)
+from decoder import *
+from encoder import *
 
 
 class Classifier(nn.Module):
@@ -97,209 +16,100 @@ class Classifier(nn.Module):
         return self.classifier(x)
 
 
-class DecoderLayer(nn.Module):
-    """
-    Transformer Decoder Layer:
-    Applies self-attention on embedded kinematics sequences, followed by cross-attention on encoded video captures
-        :param kin: embedded kinematics sequences
-        :param vid: encoded video captures
-    """
-
-    def __init__(self, interm_dim: int = 2048, feat_dim: int = 512, nhead: int = 8, dropout: int = 0, device: str = 'cuda', use_norm: bool = False, is_mask_enable: bool = False, is_decoder_only: bool = False):
-        super(DecoderLayer, self).__init__()
-        self.attn_layer = MultiHeadSelfAttention(d_model=feat_dim, nhead=nhead, dropout=dropout)
-
-        self.linear1 = nn.Linear(feat_dim, interm_dim)
-        self.linear2 = nn.Linear(interm_dim, feat_dim)
-
-        self.norm1 = nn.LayerNorm(feat_dim)
-        self.norm2 = nn.LayerNorm(feat_dim)
-        self.norm3 = nn.LayerNorm(feat_dim)
-
-        self.dropout = nn.Dropout(dropout)
-        self.activation = nn.ReLU()
-
-        self.device = device
-        self.use_norm = use_norm
-        self.is_mask_enable = is_mask_enable
-        self.is_decoder_only = is_decoder_only
-
-    def forward(self, kin, vid):
-        # generate mask
-        mask = generate_attn_mask(kin.size(1)).to(self.device) if self.is_mask_enable else None
-
-        # self-attn
-        x = self.attn_layer(q=kin, k=kin, v=kin, mask=mask) + kin
-
-        if self.use_norm:
-            x = self.norm1(x)
-
-        # cross-attn
-        if self.is_decoder_only is False:
-            x = self.attn_layer(q=x, k=vid, v=vid, mask=None) + x
-
-        # feed forward
-        if self.use_norm:
-            x = self.norm2(x)
-
-        x = self.linear2(self.activation(self.linear1(x))) + x
-
-        if self.use_norm:
-            x = self.norm3(x)
-        return x
-
-
-class Decoder(nn.Module):
-    """
-    Transformer Decoder:
-    Stacked collections of decoder layers
-        :param kin: embedded kinematics sequences
-        :param vid: encoded video captures
-    """
-
-    def __init__(self, interm_dim: int = 2048, feat_dim: int = 256, nhead: int = 8, num_decoder_layers: int = 10,
-                 dropout: int = 0, device: str = 'cuda', use_norm: bool = False, is_mask_enable: bool = False,
-                 is_decoder_only: bool = False):
-        super().__init__()
-
-        self.pos_encoder = PositionalEncoding(d_model=feat_dim, dropout=0, max_len=5000)
-        self.decoder_layer = DecoderLayer(interm_dim=interm_dim, feat_dim=feat_dim, nhead=nhead, dropout=dropout,
-                                          device=device, use_norm=use_norm, is_mask_enable=is_mask_enable,
-                                          is_decoder_only=is_decoder_only)
-        self.decoders = get_clones(self.decoder_layer, num_decoder_layers)
-
-    def forward(self, kin, vid):
-        """
-        :param kin: embedded kinematics sequences
-        :param vid: encoded video captures
-        """
-        if kin.isnan().any():
-            print("before decoder pos embedding:")
-
-        x = self.pos_encoder.forward(kin)
-
-        if x.isnan().any():
-            print("after decoder pos embedding:")
-
-        for module in self.decoders:
-            x = module(x, vid)
-
-        return x
-
-
 class DecoderOnlyTransformer(nn.Module):
     """
     Transformer computes self (intra image) and cross (inter image) attention
     """
 
-    def __init__(self, feat_dim: int = 512, nhead: int = 8, num_decoder_layers: int = 6, channel: int = 3,
-                 device: str = 'cuda', use_norm: bool = False, is_mask_enable: bool = False, input_frames: int = 300, output_frames: int = 30,
-                 is_decoder_only: bool = False):
+    def __init__(self, interm_dim, feat_dim, nhead, num_decoder_layers, channel, device, use_norm,
+                 input_frames, output_frames, attend_vid, dropout):
         super().__init__()
-        self.feat_dim = feat_dim
-        self.nhead = nhead
-        self.num_decoder_layers = num_decoder_layers
         self.channel = channel
+        self.feat_dim = feat_dim
         self.input_frames = input_frames
         self.output_frames = output_frames
-        self.is_mask_enable = is_mask_enable
 
-        self.embeddings = nn.Linear(channel, feat_dim)
-        self.decoder = Decoder(interm_dim=2048, feat_dim=feat_dim, nhead=nhead, num_decoder_layers=num_decoder_layers,
-                               dropout=0, device=device, use_norm=use_norm, is_mask_enable=is_mask_enable, is_decoder_only=is_decoder_only)
-        self.final = nn.Linear(feat_dim, channel)
-        self.final_classifier = Classifier(in_channels=feat_dim*input_frames, out_channels=channel*output_frames)
-
-    def forward(self, psm1: torch.Tensor):
-        """
-        :param psm1_past: feature descriptor of past kinematics, [N,C,W]
-        :param psm1_future: feature descriptor of future kinematics, [N,C,W]
-        :param pos_enc: relative positional encoding, [N,C,2W-1]
-        :return: cross attention values [N,H,W,W], dim=2 is left image, dim=3 is right image
-        """
-
-        # kinematics embeddings-
-        if psm1.isnan().any():
-            print("data loading:")
-        x = self.embeddings(psm1.permute(0, 2, 1))
-        # print("embedding shape = {}".format(x.shape))
-
-        # Decode
-        decoder_output = self.decoder(x, x)
-
-        # Final layer
-        if self.is_mask_enable:
-            output = self.final(decoder_output).permute(0, 2, 1)  # input shape [N, W, C]
-        else:
-            output = self.final_classifier(decoder_output.reshape(-1, self.feat_dim * self.input_frames)).reshape(-1, self.output_frames, self.channel).permute(0, 2, 1)
-        # print("fully connected layers output = {}".format(output.shape))
-
-        return output
-
-
-class EncoderDecoderTransformer(nn.Module):
-    def __init__(self, feat_dim, nhead, num_decoder_layers, channel, device, use_norm, is_mask_enable, input_frames,
-                 output_frames, is_feature_extract, num_conv_layers, input_channel, output_channel, conv_kernel_size,
-                 conv_stride, pool_kernel_size, pool_stride, padding, img_height, img_width, patch_height, patch_width,
-                 in_dim, batch_size, capture_size, dropout, interm_dim, num_encoder_layer, is_encode):
-        super().__init__()
-        self.feat_dim = feat_dim
-        self.nhead = nhead
-        self.num_decoder_layers = num_decoder_layers
-        self.channel = channel
-        self.input_frames = input_frames
-        self.output_frames = output_frames
-        self.batch_size = batch_size
-        self.is_mask_enable = is_mask_enable
-
-        self.encoder = Encoder(is_feature_extract=is_feature_extract, num_conv_layers=num_conv_layers, input_channel=input_channel,
-                    output_channel=output_channel, conv_kernel_size=conv_kernel_size, conv_stride=conv_stride, pool_kernel_size=pool_kernel_size,
-                    pool_stride=pool_stride, padding=padding, img_height=img_height, img_width=img_width, patch_height=patch_height,
-                    patch_width=patch_width, in_dim=in_dim, feat_dim=feat_dim, batch_size=batch_size, capture_size=capture_size, dropout=dropout, device=device,
-                    interm_dim=interm_dim, nhead=nhead, num_encoder_layer=num_encoder_layer, is_encode=is_encode)
-
-        self.embeddings = nn.Linear(channel, feat_dim)
-        self.decoder = Decoder(interm_dim=2048, feat_dim=feat_dim, nhead=nhead, num_decoder_layers=num_decoder_layers,
-                               dropout=0, device=device, use_norm=use_norm, is_mask_enable=is_mask_enable)
+        self.embedding_kin = nn.Linear(channel, feat_dim)
+        self.decoder = Decoder(interm_dim=interm_dim, feat_dim=feat_dim, nhead=nhead,
+                               num_decoder_layers=num_decoder_layers,
+                               dropout=dropout, device=device, use_norm=use_norm,
+                               attend_vid=attend_vid)
         self.final = nn.Linear(feat_dim, channel)
         self.final_classifier = Classifier(in_channels=feat_dim * input_frames, out_channels=channel * output_frames)
 
-    def forward(self, input):
+    def forward(self, kin, vid):
         """
-        :param psm1_past: feature descriptor of past kinematics, [N,C,W]
-        :param psm1_future: feature descriptor of future kinematics, [N,C,W]
-        :param pos_enc: relative positional encoding, [N,C,2W-1]
-        :return: cross attention values [N,H,W,W], dim=2 is left image, dim=3 is right image
+        :param kin: raw kinematics input from psm
+        :param vid: captured surgical video frames
+        """
+
+        # kinematics embeddings
+        embedded_kin = self.embedding_kin(kin.permute(0, 2, 1))
+        # print("embedding shape = {}".format(x.shape))
+
+        # Decode
+        decoder_output = self.decoder(embedded_kin, vid)
+
+        # Final layer
+        output = self.final_classifier(decoder_output.reshape(-1, self.feat_dim * self.input_frames))
+        # print("fully connected layers output = {}".format(output.shape))
+
+        return output.reshape(-1, self.output_frames, self.channel).permute(0, 2, 1)
+
+
+class VideoEncoderDecoderTransformer(nn.Module):
+    def __init__(self, feat_dim, nhead, num_decoder_layers, channel, device, use_norm, input_frames,
+                 output_frames, is_feature_extract, num_conv_layers, input_channel, output_channel, conv_kernel_size,
+                 conv_stride, pool_kernel_size, pool_stride, padding, img_height, img_width, patch_height, patch_width,
+                 in_dim, capture_size, dropout, interm_dim, num_encoder_layer, is_encode, project_type, attend_vid):
+        super().__init__()
+        self.feat_dim = feat_dim
+        self.channel = channel
+        self.input_frames = input_frames
+        self.output_frames = output_frames
+
+        self.encoder = VideoEncoder(is_feature_extract=is_feature_extract, num_conv_layers=num_conv_layers,
+                                    input_channel=input_channel, output_channel=output_channel, conv_kernel_size=conv_kernel_size,
+                                    conv_stride=conv_stride, pool_kernel_size=pool_kernel_size,
+                                    pool_stride=pool_stride, padding=padding, img_height=img_height,
+                                    img_width=img_width, patch_height=patch_height,
+                                    patch_width=patch_width, in_dim=in_dim, feat_dim=feat_dim,
+                                    capture_size=capture_size, dropout=dropout, device=device,
+                                    interm_dim=interm_dim, nhead=nhead, num_encoder_layer=num_encoder_layer,
+                                    is_encode=is_encode, project_type=project_type)
+        self.embedding_kin = nn.Linear(channel, feat_dim)
+        self.decoder = Decoder(interm_dim=interm_dim, feat_dim=feat_dim, nhead=nhead, num_decoder_layers=num_decoder_layers,
+                               dropout=dropout, device=device, use_norm=use_norm, attend_vid=attend_vid)
+        self.final = nn.Linear(feat_dim, channel)
+        self.final_classifier = Classifier(in_channels=feat_dim * input_frames, out_channels=channel * output_frames)
+
+        print("video encoder-decoder transformer instantiated...")
+
+    def forward(self, kin, vid):
+        """
+        :param kin: raw kinematics input from psm
+        :param vid: captured surgical video frames
         """
         # encoder video captures
-        encoded_cap = self.encoder(input["captures"]) # encoded capture shape [N, capture_size, patch_size, dimension]
+        embedded_vid = self.encoder(vid)  # encoded capture shape [N, capture_size, patch_size, dimension]
         # print("encoding shape = {}".format(encoded_cap.shape))
 
         # kinematics embeddings
-        embedded_kin = self.embeddings(input["kinematics"].permute(0, 2, 1))
+        embedded_kin = self.embedding_kin(kin.permute(0, 2, 1))
         # print("embedding shape = {}".format(embedded_kin.shape))
 
-        if encoded_cap.isnan().any():
-            print("after initial encoding: vid")
-
-        if embedded_kin.isnan().any():
-            print("after initial embedding: kin")
-
         # Decode
-        decoder_output = self.decoder(embedded_kin, encoded_cap)
+        decoder_output = self.decoder(embedded_kin, embedded_vid)
 
         # Final layer
-        if self.is_mask_enable:
-            output = self.final(decoder_output).permute(0, 2, 1)  # input shape [N, W, C]
-        else:
-            output = self.final_classifier(decoder_output.reshape(-1, self.feat_dim * self.input_frames)).reshape(-1, self.output_frames, self.channel).permute(0, 2, 1)
+        output = self.final_classifier(decoder_output.reshape(-1, self.feat_dim * self.input_frames))
         # print("fully connected layers output = {}".format(output.shape))
 
-        return output
+        return output.reshape(-1, self.output_frames, self.channel).permute(0, 2, 1)
 
 
 if __name__ == "__main__":
     m = nn.Softmax(dim=1)
-    input = torch.randn(2, 3)
+    input = torch.randn(16, 2, 3, 2)
     output = m(input)
     print(output)

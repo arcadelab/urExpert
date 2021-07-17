@@ -1,18 +1,16 @@
+import matplotlib.pyplot as plt
 from torch.utils.data import Dataset, DataLoader
 import os
 import torch
 import numpy as np
-import matplotlib.pyplot as plt
 import cv2.cv2 as cv2
-from skimage.io import imread
 from skimage.transform import rescale
 
 
 class KinematicsDataset(Dataset):
-    def __init__(self, kinematics_folder_path, video_capture_path, input_frames: int = 30, output_frames: int = 10,
-                 is_zero_mean: bool = False, is_zero_center: bool = False, is_overfit_extreme: bool = False,
-                 is_gap: bool = False, is_decoder_only: bool = False, interval_size: int = 10, scale: int = 1000,
-                 norm: bool = True):
+    def __init__(self, kinematics_folder_path, video_capture_path, input_frames, output_frames,
+                 is_zero_mean, is_zero_center, is_overfit_extreme, is_gap, interval_size, scale,
+                 norm, capture_size, resize_img_height, resize_img_width):
         self.kinematics_folder_path = kinematics_folder_path
         self.video_capture_path = video_capture_path
         self.kinematics_files = sorted(os.listdir(kinematics_folder_path))
@@ -33,7 +31,10 @@ class KinematicsDataset(Dataset):
         self.is_zero_center = is_zero_center
         self.is_overfit_extreme = is_overfit_extreme
         self.is_gap = is_gap
-        self.is_decoder_only = is_decoder_only
+        self.capture_size = capture_size
+        self.capture_interval = input_frames // capture_size
+        self.resize_img_height = resize_img_height
+        self.resize_img_width = resize_img_width
         # read kinematics
         for f in self.kinematics_files:
             path = os.path.join(self.kinematics_folder_path, f)
@@ -80,8 +81,8 @@ class KinematicsDataset(Dataset):
             x = fstart
 
         # extract 200 frames from PSM1 and PSM2
-        psm1_pos = np.transpose(self.kinematics[x:x + self.batch_frames, 38:41].copy()) # 38:41
-        psm2_pos = np.transpose(self.kinematics[x:x + self.batch_frames, 57:60].copy()) # 57:60
+        psm1_pos = np.transpose(self.kinematics[x:x + self.batch_frames, 38:41].copy())  # 38:41
+        psm2_pos = np.transpose(self.kinematics[x:x + self.batch_frames, 57:60].copy())  # 57:60
 
         # preprocessed zero-center data if desired
         if self.is_zero_center:
@@ -89,36 +90,23 @@ class KinematicsDataset(Dataset):
                 psm1_pos[channel] = psm1_pos[channel] - psm1_pos[channel, 0]
                 psm2_pos[channel] = psm2_pos[channel] - psm2_pos[channel, 0]
 
-        # preprocessed zero-mean data if desired
-        if self.is_zero_mean:
-            for channel in range(psm1_pos.shape[0]):
-                psm1_pos[channel] = (psm1_pos[channel] - np.mean(psm1_pos[channel])) / np.std(psm1_pos[channel])
-                psm2_pos[channel] = (psm2_pos[channel] - np.mean(psm2_pos[channel])) / np.std(psm2_pos[channel])
+        # load starting frame of input and prediction
+        captured_frames = list()
+        frame_idx = x - self.length_limit + self.kinematics_len[self.current_file_idx]
+        frame_path = os.path.join(self.video_capture_path, self.video_capture_files[self.current_file_idx*2])
+        for i in range(self.capture_size):
+            frame = cv2.cvtColor(cv2.imread(os.path.join(frame_path, os.listdir(frame_path)[frame_idx + i * self.capture_interval])), cv2.COLOR_BGR2RGB)
+            if frame.shape[0] != self.resize_img_height or frame.shape[1] != self.resize_img_width:
+                frame = rescale(frame, (self.resize_img_height/frame.shape[0], self.resize_img_width/frame.shape[1], 1), anti_aliasing=True)
+            captured_frames.append(frame)
+        frames = np.stack(captured_frames, axis=0)
 
         # convert to tensors
         psm1_pos, psm2_pos = torch.from_numpy(psm1_pos), torch.from_numpy(psm2_pos)
+        psm_pos = torch.cat((psm1_pos, psm2_pos), dim=0)
+        frames = torch.from_numpy(frames).permute(0, 3, 1, 2)
 
-        # load starting frame of input and prediction
-        if self.is_decoder_only is False:
-            # print("x = {}".format(x))
-            # print(self.length_limit)
-            # print(self.kinematics_len[self.current_file_idx])
-            # print(self.current_file_idx)
-            frame_idx = x - self.length_limit + self.kinematics_len[self.current_file_idx]
-            # print("frame idx = {}".format(frame_idx))
-            frame_path = os.path.join(self.video_capture_path, self.video_capture_files[self.current_file_idx*2])
-            # print(frame_path)
-            frame_input = cv2.cvtColor(cv2.imread(os.path.join(frame_path, os.listdir(frame_path)[frame_idx])), cv2.COLOR_BGR2RGB)
-            frame_pred = cv2.cvtColor(cv2.imread(os.path.join(frame_path, os.listdir(frame_path)[frame_idx + self.input_frames])), cv2.COLOR_BGR2RGB)
-            if frame_input.shape[0] != 480 or frame_input.shape[1] != 640:
-                frame_input = rescale(frame_input, (2, 2, 1), anti_aliasing=True)
-            if frame_pred.shape[0] != 480 or frame_pred.shape[1] != 640:
-                frame_pred = rescale(frame_pred, (2, 2, 1), anti_aliasing=True)
-            frame_input, frame_pred = torch.from_numpy(frame_input), torch.from_numpy(frame_pred)
-            frames = torch.cat((frame_input.permute(2, 0, 1).unsqueeze(0), frame_pred.permute(2, 0, 1).unsqueeze(0)), dim=0)
-            return psm1_pos, psm2_pos, frames
-        else:
-            return psm1_pos, psm2_pos
+        return psm_pos, frames
 
 
 if __name__ == "__main__":
@@ -129,16 +117,14 @@ if __name__ == "__main__":
     train_data_path = os.path.join(task_folder, "train")
     train_video_capture_path = os.path.join(video_capture_folder, "train")
 
-    train_dataset = KinematicsDataset(train_data_path, train_video_capture_path, input_frames=150, output_frames=30, is_zero_center=True, is_gap=True, is_decoder_only=False)
+    train_dataset = KinematicsDataset(train_data_path, train_video_capture_path, input_frames=150, output_frames=30, is_zero_center=True, is_gap=True, resize_img_height=120, resize_img_width=160,
+                                      is_zero_mean=False, is_overfit_extreme=False, interval_size=30, scale=1000, norm=False, capture_size=2)
     loader_train = DataLoader(train_dataset, batch_size=16, shuffle=False, drop_last=True)
 
     for i in range(2):
         print("epoch {} started...".format(i))
         for batch_id, data in enumerate(loader_train):
-            psm1_pos, psm2_pos, frames = data
-            # print(frames.shape)
-            # print(batch_id)
-            # print(psm1_pos.shape)
-            # print(psm2_pos.shape)
-            # print(nframes.numpy()[0])
+            psm_pos, frames = data
+            print(psm_pos.shape)
+            print(frames.shape)
         print("epoch {} ended...".format(i))
